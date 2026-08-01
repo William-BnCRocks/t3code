@@ -285,10 +285,38 @@ export function resolvePrimaryEnvironmentHttpUrl(
   return url.toString();
 }
 
+// A loopback target is only reachable from the machine the bundle was built
+// for. When that bundle is served to a browser on a non-loopback http(s)
+// origin (a dev desktop backend serving its LAN interface), the configured
+// 127.0.0.1 points at the viewer's own machine, not the backend that served
+// the page. The desktop renderer is unaffected: it resolves from the desktop
+// bridge first, and its window origins (t3code://app, http://127.0.0.1) never
+// match this condition.
+function isConfiguredLoopbackUnreachableFromWindow(target: PrimaryEnvironmentTarget): boolean {
+  const windowProtocol = window.location.protocol;
+  if (windowProtocol !== "http:" && windowProtocol !== "https:") {
+    return false;
+  }
+  if (isLoopbackHostname(window.location.hostname)) {
+    return false;
+  }
+  const targetUrl = parseTargetUrl({
+    rawValue: target.target.httpBaseUrl,
+    source: target.source,
+    urlKind: "http-base-url",
+  });
+  return isLoopbackHostname(targetUrl.hostname);
+}
+
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget {
-  return (
+  const resolved =
     resolveDesktopPrimaryTarget() ??
     resolveConfiguredPrimaryTarget() ??
-    resolveWindowOriginPrimaryTarget()
-  );
+    resolveWindowOriginPrimaryTarget();
+  if (resolved.source === "configured" && isConfiguredLoopbackUnreachableFromWindow(resolved)) {
+    // Resolving from the page's own origin keeps every request same-origin,
+    // which also keeps the auth session cookie first-party.
+    return resolveWindowOriginPrimaryTarget();
+  }
+  return resolved;
 }

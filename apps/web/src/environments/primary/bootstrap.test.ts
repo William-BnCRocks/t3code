@@ -155,6 +155,39 @@ describe("environmentBootstrap", () => {
     });
   });
 
+  it("prefers the window origin when a configured loopback target is served to a LAN origin", () => {
+    vi.stubEnv("VITE_HTTP_URL", "http://127.0.0.1:13773");
+    installTestBrowser("http://192.168.50.10:13773/pair");
+
+    expect(readPrimaryEnvironmentTarget()).toEqual({
+      source: "window-origin",
+      target: {
+        httpBaseUrl: "http://192.168.50.10:13773/",
+        wsBaseUrl: "ws://192.168.50.10:13773/",
+      },
+    });
+  });
+
+  it("keeps a configured loopback target when the page itself is on a loopback origin", () => {
+    vi.stubEnv("VITE_HTTP_URL", "http://127.0.0.1:13773");
+    installTestBrowser("http://localhost:5733/");
+
+    expect(readPrimaryEnvironmentTarget()).toMatchObject({
+      source: "configured",
+      target: { httpBaseUrl: "http://127.0.0.1:13773/" },
+    });
+  });
+
+  it("keeps a configured non-loopback target when served to a LAN origin", () => {
+    vi.stubEnv("VITE_HTTP_URL", "https://remote.example.com");
+    installTestBrowser("http://192.168.50.10:5733/");
+
+    expect(readPrimaryEnvironmentTarget()).toMatchObject({
+      source: "configured",
+      target: { httpBaseUrl: "https://remote.example.com/" },
+    });
+  });
+
   it("uses the current origin as the descriptor base for local dev environments", async () => {
     installTestBrowser("http://localhost:5735/");
     await installDescriptorApi();
