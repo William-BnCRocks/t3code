@@ -1,6 +1,59 @@
-import type { DesktopWslState } from "@t3tools/contracts";
+import type { AdvertisedEndpoint, DesktopWslState } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { applyWslEnableSelection } from "./ConnectionsSettings.logic";
+import {
+  applyWslEnableSelection,
+  endpointDefaultPreferenceKey,
+  selectPairingEndpoint,
+} from "./ConnectionsSettings.logic";
+
+const DESKTOP_CORE_PROVIDER: AdvertisedEndpoint["provider"] = {
+  id: "desktop-core",
+  label: "Desktop",
+  kind: "core",
+  isAddon: false,
+};
+
+const COMPATIBLE_COMPATIBILITY: AdvertisedEndpoint["compatibility"] = {
+  hostedHttpsApp: "mixed-content-blocked",
+  desktopApp: "compatible",
+};
+
+function makeLanEndpoint(input: {
+  readonly address: string;
+  readonly port: number;
+  readonly isDefault?: boolean;
+}): AdvertisedEndpoint {
+  const httpBaseUrl = `http://${input.address}:${input.port}/`;
+  return {
+    id: `desktop-lan:http://${input.address}:${input.port}`,
+    label: "Local network",
+    provider: DESKTOP_CORE_PROVIDER,
+    httpBaseUrl,
+    wsBaseUrl: `ws://${input.address}:${input.port}/`,
+    reachability: "lan",
+    compatibility: COMPATIBLE_COMPATIBILITY,
+    source: "desktop-core",
+    status: "available",
+    ...(input.isDefault ? { isDefault: true } : {}),
+    description: "Reachable from devices on the same network.",
+  };
+}
+
+function makeLoopbackEndpoint(port: number): AdvertisedEndpoint {
+  const httpBaseUrl = `http://127.0.0.1:${port}/`;
+  return {
+    id: `desktop-loopback:${port}`,
+    label: "This machine",
+    provider: DESKTOP_CORE_PROVIDER,
+    httpBaseUrl,
+    wsBaseUrl: `ws://127.0.0.1:${port}/`,
+    reachability: "loopback",
+    compatibility: COMPATIBLE_COMPATIBILITY,
+    source: "desktop-core",
+    status: "available",
+    description: "Loopback endpoint for this desktop app.",
+  };
+}
 
 const baseWslState: DesktopWslState = {
   enabled: false,
@@ -71,5 +124,59 @@ describe("applyWslEnableSelection", () => {
     expect(calls).toEqual(["setWslOnly:true", "setWslBackendEnabled:true"]);
     expect(setWslDistro).not.toHaveBeenCalled();
     expect(state).toMatchObject({ enabled: true, wslOnly: true });
+  });
+});
+
+describe("endpointDefaultPreferenceKey", () => {
+  it("gives distinct desktop-lan endpoints on different hosts distinct preference keys", () => {
+    const first = makeLanEndpoint({ address: "10.8.0.5", port: 4173 });
+    const second = makeLanEndpoint({ address: "192.168.1.20", port: 4173 });
+
+    expect(endpointDefaultPreferenceKey(first)).toBe("desktop-core:lan:http:10.8.0.5:4173");
+    expect(endpointDefaultPreferenceKey(second)).toBe("desktop-core:lan:http:192.168.1.20:4173");
+    expect(endpointDefaultPreferenceKey(first)).not.toBe(endpointDefaultPreferenceKey(second));
+  });
+
+  it("keeps the loopback preference key stable", () => {
+    expect(endpointDefaultPreferenceKey(makeLoopbackEndpoint(4173))).toBe(
+      "desktop-core:loopback:http",
+    );
+  });
+
+  it("embeds the host in tailscale-ip preference keys", () => {
+    const endpoint: AdvertisedEndpoint = {
+      id: "tailscale-ip:http://100.90.1.2:4173",
+      label: "Tailscale IP",
+      provider: { id: "tailscale", label: "Tailscale", kind: "private-network", isAddon: true },
+      httpBaseUrl: "http://100.90.1.2:4173/",
+      wsBaseUrl: "ws://100.90.1.2:4173/",
+      reachability: "private-network",
+      compatibility: COMPATIBLE_COMPATIBILITY,
+      source: "desktop-addon",
+      status: "available",
+      description: "Reachable from devices on the same Tailnet.",
+    };
+
+    expect(endpointDefaultPreferenceKey(endpoint)).toBe("tailscale:ip:http:100.90.1.2:4173");
+  });
+});
+
+describe("selectPairingEndpoint", () => {
+  it("selects the endpoint matching a stored preference key for the second LAN address", () => {
+    const first = makeLanEndpoint({ address: "10.8.0.5", port: 4173, isDefault: true });
+    const second = makeLanEndpoint({ address: "192.168.1.20", port: 4173 });
+
+    const selected = selectPairingEndpoint([first, second], endpointDefaultPreferenceKey(second));
+
+    expect(selected).toBe(second);
+  });
+
+  it("falls back to the default endpoint when a legacy preference key matches nothing", () => {
+    const first = makeLanEndpoint({ address: "10.8.0.5", port: 4173, isDefault: true });
+    const second = makeLanEndpoint({ address: "192.168.1.20", port: 4173 });
+
+    const selected = selectPairingEndpoint([first, second], "desktop-core:lan:http");
+
+    expect(selected).toBe(first);
   });
 });
