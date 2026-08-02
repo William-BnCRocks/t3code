@@ -31,6 +31,7 @@ import {
   CornerLeftUpIcon,
   FolderIcon,
   FolderPlusIcon,
+  GaugeIcon,
   LinkIcon,
   MessageSquareIcon,
   SettingsIcon,
@@ -113,6 +114,7 @@ import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusI
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import { resolveDefaultProviderModelSelection } from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
+import { useProviderUsageOverlayStore } from "../providerUsageOverlayStore";
 import {
   Command,
   CommandDialog,
@@ -1324,6 +1326,29 @@ function OpenCommandPaletteDialog(props: {
     icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/settings" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:provider-usage",
+    searchTerms: [
+      "usage",
+      "limits",
+      "rate limit",
+      "quota",
+      "5 hour",
+      "weekly",
+      "window",
+      "reset",
+      "claude",
+      "codex",
+    ],
+    title: "Provider usage",
+    icon: <GaugeIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "providerUsage.toggle",
+    run: async () => {
+      useProviderUsageOverlayStore.getState().open();
     },
   });
 

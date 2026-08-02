@@ -154,6 +154,30 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+export const ServerProviderRateLimitWindowStatus = Schema.Literals([
+  "allowed",
+  "allowed_warning",
+  "rejected",
+]);
+export type ServerProviderRateLimitWindowStatus = typeof ServerProviderRateLimitWindowStatus.Type;
+
+export const ServerProviderRateLimitWindow = Schema.Struct({
+  kind: TrimmedNonEmptyString,
+  usedPercent: Schema.optional(Schema.Number),
+  resetsAt: Schema.optional(IsoDateTime),
+  windowDurationMins: Schema.optional(Schema.Number),
+  status: Schema.optional(ServerProviderRateLimitWindowStatus),
+});
+export type ServerProviderRateLimitWindow = typeof ServerProviderRateLimitWindow.Type;
+
+export const ServerProviderRateLimits = Schema.Struct({
+  observedAt: IsoDateTime,
+  windows: Schema.Array(ServerProviderRateLimitWindow),
+  planLabel: Schema.optional(TrimmedNonEmptyString),
+  creditsLabel: Schema.optional(TrimmedNonEmptyString),
+});
+export type ServerProviderRateLimits = typeof ServerProviderRateLimits.Type;
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -190,6 +214,7 @@ export const ServerProvider = Schema.Struct({
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
+  rateLimits: Schema.optionalKey(ServerProviderRateLimits),
 });
 export type ServerProvider = typeof ServerProvider.Type;
 

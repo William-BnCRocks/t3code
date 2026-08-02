@@ -18,6 +18,7 @@ import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDi
 import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
+import { ProviderUsageOverlay } from "../components/usage/ProviderUsageOverlay";
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
 import { Button } from "../components/ui/button";
 import {
@@ -136,6 +137,7 @@ function RootRouteView() {
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
+        {primaryEnvironmentAuthenticated ? <ProviderUsageOverlay /> : null}
         {appShell}
       </AnchoredToastProvider>
     </ToastProvider>

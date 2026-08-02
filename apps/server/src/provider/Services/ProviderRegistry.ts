@@ -70,6 +70,22 @@ export interface ProviderRegistryShape {
   }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
+   * Fold one raw account rate-limit telemetry payload onto the volatile
+   * `ServerProvider.rateLimits` snapshot for a configured instance. This
+   * state is never persisted to disk (like `setProviderMaintenanceActionState`).
+   * `payload` is the untrusted `event.payload.rateLimits` value from an
+   * `account.rate-limits.updated` runtime event; it is normalized and
+   * merged over the previous snapshot by `mergeProviderRateLimits`, which
+   * never throws on malformed input.
+   */
+  readonly applyProviderAccountRateLimits: (input: {
+    readonly instanceId: ProviderInstanceId;
+    readonly provider: ProviderDriverKind;
+    readonly payload: unknown;
+    readonly observedAt: string;
+  }) => Effect.Effect<void>;
+
+  /**
    * Stream of provider snapshot updates — one emission per aggregated
    * change. The array contains the full current state.
    */

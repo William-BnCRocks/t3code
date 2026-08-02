@@ -893,6 +893,126 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         }),
       );
 
+      it.effect(
+        "applies account rate limits onto the matching provider, publishing once for a change and not again for a repeat",
+        () =>
+          Effect.gen(function* () {
+            const codexDriver = ProviderDriverKind.make("codex");
+            const codexInstanceId = ProviderInstanceId.make("codex");
+            const initialProvider = {
+              instanceId: codexInstanceId,
+              driver: codexDriver,
+              status: "ready",
+              enabled: true,
+              installed: true,
+              auth: { status: "authenticated" },
+              checkedAt: "2026-06-10T00:00:00.000Z",
+              version: "1.0.0",
+              models: [],
+              slashCommands: [],
+              skills: [],
+            } as const satisfies ServerProvider;
+            const instance = {
+              instanceId: codexInstanceId,
+              driverKind: codexDriver,
+              continuationIdentity: {
+                driverKind: codexDriver,
+                continuationKey: "codex:instance:codex",
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: codexDriver,
+                  packageName: null,
+                }),
+                getSnapshot: Effect.succeed(initialProvider),
+                refresh: Effect.never,
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            } satisfies ProviderInstance;
+            const instanceRegistryLayer = Layer.succeed(
+              ProviderInstanceRegistry.ProviderInstanceRegistry,
+              {
+                getInstance: (instanceId) =>
+                  Effect.succeed(instanceId === codexInstanceId ? instance : undefined),
+                listInstances: Effect.succeed([instance]),
+                listUnavailable: Effect.succeed([]),
+                streamChanges: Stream.empty,
+                subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+              },
+            );
+            const scope = yield* Scope.make();
+            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+            const runtimeServices = yield* Layer.build(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceRegistryLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(process.cwd(), {
+                    prefix: "t3-provider-registry-rate-limits-",
+                  }),
+                ),
+                Layer.provideMerge(NodeServices.layer),
+              ),
+            ).pipe(Scope.provide(scope));
+
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry.ProviderRegistry;
+              const publishedSnapshots: Array<ReadonlyArray<ServerProvider>> = [];
+
+              // Subscribe before triggering any change, then yield twice so
+              // the forked consumer reaches `PubSub.subscribe` before the
+              // first publish — otherwise the publish below would race an
+              // as-yet-unsubscribed consumer and be silently dropped.
+              yield* Effect.forkScoped(
+                Stream.runForEach(registry.streamChanges, (snapshot) =>
+                  Effect.sync(() => {
+                    publishedSnapshots.push(snapshot);
+                  }),
+                ),
+              );
+              yield* Effect.yieldNow;
+              yield* Effect.yieldNow;
+
+              const applyInput = {
+                instanceId: codexInstanceId,
+                provider: codexDriver,
+                payload: { primary: { usedPercent: 42 } },
+                observedAt: "2026-06-10T00:01:00.000Z",
+              };
+              yield* registry.applyProviderAccountRateLimits(applyInput);
+              yield* Effect.yieldNow;
+              yield* Effect.yieldNow;
+
+              assert.strictEqual(publishedSnapshots.length, 1);
+              const publishedCodex = publishedSnapshots[0]?.find(
+                (provider) => provider.instanceId === codexInstanceId,
+              );
+              assert.deepStrictEqual(publishedCodex?.rateLimits, {
+                observedAt: "2026-06-10T00:01:00.000Z",
+                windows: [{ kind: "primary", usedPercent: 42 }],
+              });
+
+              const providersAfterFirstApply = yield* registry.getProviders;
+              assert.deepStrictEqual(
+                providersAfterFirstApply.find((provider) => provider.instanceId === codexInstanceId)
+                  ?.rateLimits,
+                publishedCodex?.rateLimits,
+              );
+
+              // A second, identical apply must not publish again — the same
+              // structural-equality gate (`haveProvidersChanged`) that
+              // guards every other provider mutation.
+              yield* registry.applyProviderAccountRateLimits(applyInput);
+              yield* Effect.yieldNow;
+              yield* Effect.yieldNow;
+              assert.strictEqual(publishedSnapshots.length, 1);
+            }).pipe(Effect.provide(runtimeServices));
+          }),
+      );
+
       it("persists merged provider snapshots for the providers that were refreshed", () => {
         const previousProviders = [
           {

@@ -121,6 +121,40 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     }),
   );
 
+  it.effect("strips volatile updateState and rateLimits before persisting to disk", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-provider-cache-volatile-" });
+      const filePath = `${tempDir}/provider.json`;
+      const providerWithVolatileState = makeProvider(CODEX_DRIVER, {
+        updateState: {
+          status: "running",
+          startedAt: "2026-04-11T00:00:00.000Z",
+          finishedAt: null,
+          message: null,
+          output: null,
+        },
+        rateLimits: {
+          observedAt: "2026-04-11T00:00:00.000Z",
+          windows: [{ kind: "primary", usedPercent: 42 }],
+        },
+      });
+
+      yield* writeProviderStatusCache({ filePath, provider: providerWithVolatileState });
+
+      const rawContents = yield* fs.readFileString(filePath);
+      assert.ok(!rawContents.includes("updateState"));
+      assert.ok(!rawContents.includes("rateLimits"));
+
+      const {
+        updateState: _updateState,
+        rateLimits: _rateLimits,
+        ...expectedProvider
+      } = providerWithVolatileState;
+      assert.deepStrictEqual(yield* readProviderStatusCache(filePath), expectedProvider);
+    }),
+  );
+
   it("hydrates cached provider status while preserving current settings-derived models", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",

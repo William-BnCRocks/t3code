@@ -28,6 +28,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -695,6 +696,7 @@ const make = Effect.gen(function* () {
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const providerUsageLog = yield* ProviderUsageLog;
+  const providerRegistry = yield* ProviderRegistry;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -1301,6 +1303,14 @@ const make = Effect.gen(function* () {
       // worker's outer `processInputSafely` catch is a second backstop.
       if (event.type === "account.rate-limits.updated") {
         yield* providerUsageLog.record(event);
+        if (event.providerInstanceId !== undefined) {
+          yield* providerRegistry.applyProviderAccountRateLimits({
+            instanceId: event.providerInstanceId,
+            provider: event.provider,
+            payload: event.payload.rateLimits,
+            observedAt: event.createdAt,
+          });
+        }
       }
 
       const thread = yield* resolveThreadShell(event.threadId);

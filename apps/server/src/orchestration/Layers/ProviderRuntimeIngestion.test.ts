@@ -41,6 +41,10 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderRegistry,
+  type ProviderRegistryShape,
+} from "../../provider/Services/ProviderRegistry.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -162,6 +166,37 @@ function createProviderServiceHarness() {
   };
 }
 
+interface RecordedApplyProviderAccountRateLimitsCall {
+  readonly instanceId: ProviderInstanceId;
+  readonly provider: ProviderDriverKind;
+  readonly payload: unknown;
+  readonly observedAt: string;
+}
+
+// Lightweight recording double, not the real `ProviderRegistryLive` — that
+// Layer pulls in `ProviderInstanceRegistry` and its own dependency graph,
+// which this ingestion-focused suite has no other reason to construct.
+// Only `applyProviderAccountRateLimits` is exercised by
+// `ProviderRuntimeIngestion`; every other member is a diagnostic stub.
+function createProviderRegistryHarness() {
+  const calls: RecordedApplyProviderAccountRateLimitsCall[] = [];
+  const unsupported = () =>
+    Effect.die(new Error("Unsupported provider registry call in test")) as never;
+  const registry: ProviderRegistryShape = {
+    getProviders: Effect.succeed([]),
+    refresh: () => unsupported(),
+    refreshInstance: () => unsupported(),
+    getProviderMaintenanceCapabilitiesForInstance: () => unsupported(),
+    setProviderMaintenanceActionState: () => unsupported(),
+    applyProviderAccountRateLimits: (input) =>
+      Effect.sync(() => {
+        calls.push(input);
+      }),
+    streamChanges: Stream.empty,
+  };
+  return { registry, calls };
+}
+
 type ProviderRuntimeTestReadModel = OrchestrationReadModel;
 type ProviderRuntimeTestThread = ProviderRuntimeTestReadModel["threads"][number];
 type ProviderRuntimeTestMessage = ProviderRuntimeTestThread["messages"][number];
@@ -229,6 +264,7 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const providerRegistry = createProviderRegistryHarness();
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -246,6 +282,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(Layer.succeed(ProviderRegistry, providerRegistry.registry)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), options?.baseDir ?? process.cwd())),
       Layer.provideMerge(NodeServices.layer),
@@ -323,6 +360,7 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      registryCalls: providerRegistry.calls,
       drain,
       stateDir,
     };
@@ -3496,6 +3534,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "account.rate-limits.updated",
       eventId: asEventId("evt-rate-limits-ingestion"),
       provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
       threadId: asThreadId("thread-1"),
       createdAt: now,
       payload: {
@@ -3504,6 +3543,17 @@ describe("ProviderRuntimeIngestion", () => {
     });
 
     await harness.drain();
+
+    // The registry saw the same normalized apply for the event's instance,
+    // so `ServerProvider.rateLimits` picks up the snapshot alongside the
+    // usage-log capture asserted below.
+    expect(harness.registryCalls).toHaveLength(1);
+    expect(harness.registryCalls[0]).toMatchObject({
+      instanceId: "codex",
+      provider: "codex",
+      observedAt: now,
+      payload: { primary: { usedPercent: 17 } },
+    });
 
     // Filename is keyed by the wall-clock observation time (real Clock in
     // this suite), not by the event's own (possibly stale/replayed) createdAt.
@@ -3533,5 +3583,25 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread?.activities.some((activity) => activity.kind.startsWith("rate-limit"))).toBe(
       false,
     );
+  });
+
+  it("skips the provider registry apply when account.rate-limits.updated has no providerInstanceId", async () => {
+    const usageBaseDir = makeTempDir("t3-provider-usage-log-ingestion-no-instance-");
+    const harness = await createHarness({ baseDir: usageBaseDir });
+
+    harness.emit({
+      type: "account.rate-limits.updated",
+      eventId: asEventId("evt-rate-limits-no-instance"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {
+        rateLimits: { primary: { usedPercent: 17 } },
+      },
+    });
+
+    await harness.drain();
+
+    expect(harness.registryCalls).toHaveLength(0);
   });
 });
