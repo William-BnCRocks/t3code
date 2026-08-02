@@ -1592,6 +1592,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       desktop: {
         entry: {
           StartupWMClass: "t3code",
+          // electron-builder's Linux targets don't apply the top-level
+          // `protocols` option the way macOS/Windows do -- xdg registers a
+          // scheme handler from the .desktop file's own MimeType entry, so
+          // it's declared directly here. Production scheme only: a packaged
+          // build is never the development flavor (t3code-dev), so there's
+          // no dev-scheme handler to register.
+          MimeType: "x-scheme-handler/t3code;",
         },
       },
     };
@@ -1606,6 +1613,17 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // of code signing. Disabling it for local unsigned builds leaves the
       // packaged executable with Electron's stock icon.
       signAndEditExecutable: true,
+      // NSIS reads the top-level `protocols` option and writes the matching
+      // registry keys during install (electron-builder's Windows protocol
+      // registration isn't mac-only, unlike Linux -- see the `linux` branch
+      // above for why that platform needs a different mechanism). Production
+      // scheme only, same reasoning as Linux.
+      protocols: [
+        {
+          name: "T3 Code",
+          schemes: ["t3code"],
+        },
+      ],
     };
     if (signed) {
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;

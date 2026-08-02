@@ -7,7 +7,10 @@ import * as Ref from "effect/Ref";
 
 import * as Electron from "electron";
 
+import type { DesktopDeepLinkPayload } from "@t3tools/contracts";
+
 import * as DesktopAssets from "../app/DesktopAssets.ts";
+import * as DesktopDeepLinkCoordinator from "../app/DesktopDeepLinkCoordinator.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
@@ -15,7 +18,11 @@ import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
-import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
+import {
+  DEEP_LINK_CHANNEL,
+  MENU_ACTION_CHANNEL,
+  WINDOW_FULLSCREEN_STATE_CHANNEL,
+} from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
@@ -41,6 +48,7 @@ type WindowTitleBarOptions = Pick<
 >;
 
 type DesktopWindowRuntimeServices =
+  | DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator
   | DesktopEnvironment.DesktopEnvironment
   | DesktopAssets.DesktopAssets
   | DesktopAppSettings.DesktopAppSettings
@@ -80,6 +88,15 @@ export class DesktopWindow extends Context.Service<
     readonly handleBackendNotReady: Effect.Effect<void>;
     readonly flushMainWindowBounds: Effect.Effect<void>;
     readonly dispatchMenuAction: (action: string) => Effect.Effect<void, DesktopWindowError>;
+    // Delivers an OS-level deep link (t3code://new?prompt=...) to the
+    // renderer. Always latches the link into the shared
+    // DesktopDeepLinkCoordinator first so a window that doesn't exist yet
+    // (cold start, still-loading) or a race with backend readiness never
+    // drops it -- the pending link is flushed the next time the main window
+    // finishes loading (see the `did-finish-load` handler below).
+    readonly dispatchDeepLink: (
+      link: DesktopDeepLinkPayload,
+    ) => Effect.Effect<void, DesktopWindowError>;
     readonly syncAppearance: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
@@ -240,6 +257,7 @@ function bindFirstRevealTrigger(
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const assets = yield* DesktopAssets.DesktopAssets;
+  const deepLinkCoordinator = yield* DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator;
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const electronShell = yield* ElectronShell.ElectronShell;
   const electronTheme = yield* ElectronTheme.ElectronTheme;
@@ -266,6 +284,19 @@ export const make = Effect.gen(function* () {
       splash.value.close();
     }
   });
+
+  // Delivers whatever deep link is currently latched into the coordinator to
+  // `window`, then clears it. Called both from dispatchDeepLink (when a live,
+  // finished-loading window is already available) and from the window's own
+  // `did-finish-load` handler (to flush a link that arrived while there was
+  // no window yet, or while the window was still on its first paint).
+  const flushPendingDeepLink = (window: Electron.BrowserWindow) =>
+    Effect.gen(function* () {
+      const pending = yield* Ref.getAndSet(deepLinkCoordinator.pending, Option.none());
+      if (Option.isNone(pending) || window.isDestroyed()) return;
+      window.webContents.send(DEEP_LINK_CHANNEL, pending.value);
+      yield* electronWindow.reveal(window);
+    });
 
   // currentMainOrFirst / focusedMainOrFirst fall back to "any first window",
   // which during WSL-only boot is the connecting splash. The splash is never
@@ -590,6 +621,7 @@ export const make = Effect.gen(function* () {
       clearDevelopmentLoadRetry();
       developmentLoadRetryIndex = 0;
       window.setTitle(environment.displayName);
+      runFork(flushPendingDeepLink(window));
     });
     window.webContents.on(
       "did-fail-load",
@@ -786,6 +818,24 @@ export const make = Effect.gen(function* () {
       }
 
       send();
+    }),
+    dispatchDeepLink: Effect.fn("desktop.window.dispatchDeepLink")(function* (link) {
+      yield* Effect.annotateCurrentSpan({ kind: link.kind });
+      yield* Ref.set(deepLinkCoordinator.pending, Option.some(link));
+      const existingWindow = yield* focusedMainWindow;
+      if (Option.isNone(existingWindow) && !(yield* Ref.get(backendReadyRef))) {
+        // No window to deliver to yet and the backend isn't ready to create
+        // one -- stays latched in the coordinator and is flushed once the
+        // main window's first load finishes (cold start / WSL-splash boot).
+        return;
+      }
+      const targetWindow = Option.isSome(existingWindow) ? existingWindow.value : yield* ensureMain;
+      if (targetWindow.webContents.isLoadingMainFrame()) {
+        // The `did-finish-load` handler flushes the coordinator once this
+        // load completes.
+        return;
+      }
+      yield* flushPendingDeepLink(targetWindow);
     }),
     syncAppearance: Effect.gen(function* () {
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;

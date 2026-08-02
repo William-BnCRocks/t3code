@@ -51,6 +51,11 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
+        // Pre-fills the draft's composer text without sending it. Used by
+        // the desktop deep-link handler (t3code://new?prompt=...) so the
+        // user lands on a fresh draft with their prompt ready to review
+        // rather than auto-submitted.
+        prefillPrompt?: string;
       },
     ): Promise<void> => {
       const {
@@ -62,6 +67,7 @@ export function useNewThreadHandler() {
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
         setModelSelection,
+        prefillPrompt,
       } = useComposerDraftStore.getState();
       const currentRouteTarget = getCurrentRouteTarget();
       // A new thread carries the user's *working mode* from the thread being
@@ -191,11 +197,14 @@ export function useNewThreadHandler() {
             reusableStoredDraftThread.draftId,
             {
               threadId: reusableStoredDraftThread.threadId,
-              ...(workspaceContext ?? {}),
+              ...workspaceContext,
               ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );
+          if (options?.prefillPrompt) {
+            prefillPrompt(reusableStoredDraftThread.draftId, options.prefillPrompt);
+          }
           if (
             currentRouteTarget?.kind === "draft" &&
             currentRouteTarget.draftId === reusableStoredDraftThread.draftId
@@ -239,6 +248,9 @@ export function useNewThreadHandler() {
           ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
           ...(hasStartFromOriginOption ? { startFromOrigin: options?.startFromOrigin } : {}),
         });
+        if (options?.prefillPrompt) {
+          prefillPrompt(currentRouteTarget.draftId, options.prefillPrompt);
+        }
         return Promise.resolve();
       }
 
@@ -263,6 +275,9 @@ export function useNewThreadHandler() {
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
         applyStickyState(draftId);
+        if (options?.prefillPrompt) {
+          prefillPrompt(draftId, options.prefillPrompt);
+        }
         if (carryModelSelection) {
           // After sticky state so the viewed thread's exact selection
           // (model + options like effort and context window) wins over the

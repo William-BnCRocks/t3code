@@ -353,6 +353,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.deepStrictEqual(config.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);
         assert.deepStrictEqual(config.files, DESKTOP_FILE_EXCLUSIONS);
       }
+
+      // Linux registers the deep-link scheme via the .desktop file's own
+      // MimeType entry (electron-builder doesn't apply the top-level
+      // `protocols` option to Linux targets the way it does mac/Windows).
+      const linuxConfig = linux.linux as Record<string, unknown>;
+      const linuxDesktop = linuxConfig.desktop as { entry: Record<string, string> };
+      assert.equal(linuxDesktop.entry.MimeType, "x-scheme-handler/t3code;");
+      assert.equal(linuxDesktop.entry.StartupWMClass, "t3code");
+
+      // Windows registers the deep-link scheme through NSIS's own reading of
+      // the top-level `protocols` option (writes the registry keys at
+      // install time) -- production scheme only, since a packaged build is
+      // never the development flavor.
+      const winConfig = win.win as Record<string, unknown>;
+      assert.deepStrictEqual(winConfig.protocols, [{ name: "T3 Code", schemes: ["t3code"] }]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 

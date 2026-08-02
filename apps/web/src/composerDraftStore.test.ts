@@ -767,6 +767,19 @@ describe("composerDraftStore project draft thread mapping", () => {
     });
   });
 
+  it("prefillPrompt sets the prompt on an empty draft", () => {
+    const store = useComposerDraftStore.getState();
+    store.prefillPrompt(draftId, "from a deep link");
+    expect(draftByKey(draftId)?.prompt).toBe("from a deep link");
+  });
+
+  it("prefillPrompt appends after a blank line instead of clobbering typed text", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(draftId, "already typed, unsent");
+    store.prefillPrompt(draftId, "from a deep link");
+    expect(draftByKey(draftId)?.prompt).toBe("already typed, unsent\n\nfrom a deep link");
+  });
+
   it("clears only matching project draft mapping entries", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });

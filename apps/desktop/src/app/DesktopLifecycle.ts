@@ -1,3 +1,4 @@
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,6 +8,7 @@ import * as Scope from "effect/Scope";
 
 import type * as Electron from "electron";
 
+import { findDeepLinkInArgv, parseDesktopDeepLink } from "./desktopDeepLinks.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
@@ -177,6 +179,53 @@ export const make = DesktopLifecycle.of({
     const runEffect = Effect.runPromiseWith(context);
     let quitAllowed = false;
     let updaterQuitAllowed = false;
+
+    const dispatchDeepLinkSafely = (
+      link: NonNullable<ReturnType<typeof parseDesktopDeepLink>>,
+      spanName: string,
+    ) =>
+      void runEffect(
+        desktopWindow.dispatchDeepLink(link).pipe(
+          Effect.withSpan(spanName),
+          Effect.catchCause((cause) =>
+            logLifecycleError("failed to dispatch deep link", { message: Cause.pretty(cause) }),
+          ),
+        ),
+      );
+
+    // macOS delivers deep links (cold start and re-activation alike) via
+    // `open-url` instead of argv/second-instance. Electron's guidance is to
+    // register this "as early as possible, ideally even before the ready
+    // event" -- `register` already runs before `electronApp.whenReady` in
+    // DesktopApp's startup sequence, so this satisfies that.
+    yield* electronApp.on("open-url", (event: Electron.Event, url: string) => {
+      event.preventDefault();
+      const link = parseDesktopDeepLink(url, { isDevelopment: environment.isDevelopment });
+      if (link === null) return;
+      dispatchDeepLinkSafely(link, "desktop.lifecycle.openUrl");
+    });
+
+    // Windows/Linux cold start: the OS launches a brand-new process with the
+    // deep link as a plain argv entry -- there is no `open-url` event and,
+    // since this is the surviving single-instance-lock holder, no
+    // `second-instance` event either (that only fires on *later* launches
+    // once this instance already owns the lock; see DesktopClerk.configure).
+    // Scan once here, before the backend or main window exist:
+    // dispatchDeepLink latches the link into the shared coordinator and
+    // DesktopWindow flushes it once the main window's first load finishes.
+    if (environment.platform !== "darwin") {
+      const coldStartDeepLinkUrl = findDeepLinkInArgv(process.argv, {
+        isDevelopment: environment.isDevelopment,
+      });
+      const coldStartLink =
+        coldStartDeepLinkUrl !== null
+          ? parseDesktopDeepLink(coldStartDeepLinkUrl, { isDevelopment: environment.isDevelopment })
+          : null;
+      if (coldStartLink !== null) {
+        dispatchDeepLinkSafely(coldStartLink, "desktop.lifecycle.coldStartDeepLink");
+      }
+    }
+
     yield* electronTheme.onUpdated(() => {
       void runEffect(
         desktopWindow.syncAppearance.pipe(Effect.withSpan("desktop.lifecycle.themeUpdated")),

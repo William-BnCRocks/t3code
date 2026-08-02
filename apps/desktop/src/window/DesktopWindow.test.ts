@@ -34,6 +34,7 @@ vi.mock("electron", async (importOriginal) => ({
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
+import * as DesktopDeepLinkCoordinator from "../app/DesktopDeepLinkCoordinator.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -41,7 +42,11 @@ import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
-import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
+import {
+  DEEP_LINK_CHANNEL,
+  MENU_ACTION_CHANNEL,
+  WINDOW_FULLSCREEN_STATE_CHANNEL,
+} from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
@@ -109,6 +114,7 @@ function makeFakeBrowserWindow() {
     getNormalBounds: window.getNormalBounds,
     isDestroyed: window.isDestroyed,
     isFullScreen: window.isFullScreen,
+    isLoadingMainFrame: webContents.isLoadingMainFrame,
     isMaximized: window.isMaximized,
     isMinimized: window.isMinimized,
     loadURL: window.loadURL,
@@ -267,6 +273,7 @@ function makeTestLayer(input: {
         }),
       ),
     ),
+    Layer.provideMerge(DesktopDeepLinkCoordinator.layer),
   );
 }
 
@@ -361,6 +368,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
           }),
         ),
       ),
+      Layer.provideMerge(DesktopDeepLinkCoordinator.layer),
     );
 
     return { layer, createCalls, mainWindow, revealedWindows } as const;
@@ -1097,5 +1105,96 @@ describe("DesktopWindow", () => {
         assert.deepEqual(main.send.mock.calls, [[MENU_ACTION_CHANNEL, "open-settings"]]);
       }).pipe(Effect.provide(scenario.layer));
     }),
+  );
+
+  it.effect("sends a deep link immediately to an already-loaded window", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        yield* desktopWindow.dispatchDeepLink({ kind: "new-thread", prompt: "hello" });
+
+        assert.deepEqual(fakeWindow.send.mock.calls, [
+          [DEEP_LINK_CHANNEL, { kind: "new-thread", prompt: "hello" }],
+        ]);
+        const coordinator = yield* DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator;
+        assert.isTrue(Option.isNone(yield* Ref.get(coordinator.pending)));
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("flushes a deep link once a still-loading window finishes loading", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        fakeWindow.isLoadingMainFrame.mockReturnValue(true);
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        yield* desktopWindow.dispatchDeepLink({ kind: "new-thread", prompt: "still loading" });
+        assert.equal(fakeWindow.send.mock.calls.length, 0);
+
+        const didFinishLoad = fakeWindow.webContentsListeners.get("did-finish-load");
+        if (!didFinishLoad) {
+          return yield* Effect.die("did-finish-load listener was not registered");
+        }
+        didFinishLoad();
+
+        assert.deepEqual(fakeWindow.send.mock.calls, [
+          [DEEP_LINK_CHANNEL, { kind: "new-thread", prompt: "still loading" }],
+        ]);
+        const coordinator = yield* DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator;
+        assert.isTrue(Option.isNone(yield* Ref.get(coordinator.pending)));
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect(
+    "stashes a deep link and flushes it once the main window opens (cold start / backend not ready yet)",
+    () =>
+      Effect.gen(function* () {
+        const main = makeFakeBrowserWindow();
+        const scenario = yield* makeSplashScenario([main.window]);
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+
+          yield* desktopWindow.dispatchDeepLink({ kind: "new-thread", prompt: "no window yet" });
+          assert.equal(yield* Ref.get(scenario.createCalls), 0);
+
+          const coordinator = yield* DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator;
+          assert.deepEqual(
+            yield* Ref.get(coordinator.pending),
+            Option.some({ kind: "new-thread", prompt: "no window yet" } as const),
+          );
+
+          const readyExit = yield* Effect.exit(
+            desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773")),
+          );
+          assert.equal(readyExit._tag, "Success");
+          assert.equal(yield* Ref.get(scenario.createCalls), 1);
+
+          const didFinishLoad = main.webContentsListeners.get("did-finish-load");
+          if (!didFinishLoad) {
+            return yield* Effect.die("did-finish-load listener was not registered");
+          }
+          didFinishLoad();
+
+          assert.deepEqual(main.send.mock.calls, [
+            [DEEP_LINK_CHANNEL, { kind: "new-thread", prompt: "no window yet" }],
+          ]);
+          assert.isTrue(Option.isNone(yield* Ref.get(coordinator.pending)));
+        }).pipe(Effect.provide(scenario.layer));
+      }),
   );
 });

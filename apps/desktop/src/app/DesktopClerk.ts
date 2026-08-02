@@ -4,13 +4,19 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+
+import type * as Electron from "electron";
 
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import { DEEP_LINK_CHANNEL } from "../ipc/channels.ts";
+import { findDeepLinkInArgv, parseDesktopDeepLink } from "./desktopDeepLinks.ts";
+import * as DesktopDeepLinkCoordinator from "./DesktopDeepLinkCoordinator.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
@@ -47,7 +53,10 @@ export class DesktopClerk extends Context.Service<
     readonly configure: Effect.Effect<
       void,
       never,
-      ElectronApp.ElectronApp | ElectronWindow.ElectronWindow | Scope.Scope
+      | DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator
+      | ElectronApp.ElectronApp
+      | ElectronWindow.ElectronWindow
+      | Scope.Scope
     >;
   }
 >()("@t3tools/desktop/app/DesktopClerk") {}
@@ -110,6 +119,7 @@ export const make = Effect.gen(function* () {
     configure: Effect.gen(function* () {
       const electronApp = yield* ElectronApp.ElectronApp;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
+      const deepLinkCoordinator = yield* DesktopDeepLinkCoordinator.DesktopDeepLinkCoordinator;
       const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
       const runPromise = Effect.runPromiseWith(context);
 
@@ -118,13 +128,38 @@ export const make = Effect.gen(function* () {
         return yield* Effect.interrupt;
       }
 
-      yield* electronApp.on("second-instance", () => {
+      yield* electronApp.on("second-instance", (_event: Electron.Event, argv: string[]) => {
         void runPromise(
           Effect.gen(function* () {
+            const deepLinkUrl = findDeepLinkInArgv(argv, {
+              isDevelopment: environment.isDevelopment,
+            });
+            const link =
+              deepLinkUrl !== null
+                ? parseDesktopDeepLink(deepLinkUrl, { isDevelopment: environment.isDevelopment })
+                : null;
+
             const mainWindow = yield* electronWindow.currentMainOrFirst;
             if (Option.isSome(mainWindow)) {
               yield* electronWindow.reveal(mainWindow.value);
             }
+
+            if (link === null) return;
+
+            // Deliver immediately when there's already a live, loaded
+            // window to send to. Otherwise (no window yet, or the window is
+            // still on its first paint) latch the link into the shared
+            // coordinator -- DesktopWindow's own `did-finish-load` handler
+            // flushes it once a real load completes. DesktopClerk cannot
+            // depend on DesktopWindow itself (see the clerk/application
+            // layer split in main.ts), so this is a deliberately thin,
+            // duplicated send rather than reusing dispatchDeepLink.
+            if (Option.isSome(mainWindow) && !mainWindow.value.webContents.isLoadingMainFrame()) {
+              mainWindow.value.webContents.send(DEEP_LINK_CHANNEL, link);
+              return;
+            }
+
+            yield* Ref.set(deepLinkCoordinator.pending, Option.some(link));
           }),
         );
       });

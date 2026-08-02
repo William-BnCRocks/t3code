@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as NetService from "@t3tools/shared/Net";
@@ -136,6 +137,37 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
 const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
   handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
 
+// Registers this build's deep-link scheme (t3code:// production,
+// t3code-dev:// development) as the OS handler for
+// `t3code://new?prompt=...` launches. Electron's docs say to call this after
+// the app is ready, so `startup` invokes it right after `whenReady` resolves.
+const registerDeepLinkProtocolClient = Effect.gen(function* () {
+  const electronApp = yield* ElectronApp.ElectronApp;
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const path = yield* Path.Path;
+  const scheme = ElectronProtocol.getDesktopScheme(environment.isDevelopment);
+
+  if (environment.isDevelopment && process.argv.length >= 2) {
+    // Development runs the unpackaged app via `electron dist-electron/main.cjs`,
+    // not an installed binary -- Electron needs the exact entry-point argv to
+    // reconstruct a launch command the OS can record for the scheme (mirrors
+    // Electron's own setAsDefaultProtocolClient documentation example).
+    yield* electronApp.setAsDefaultProtocolClient(scheme, process.execPath, [
+      path.resolve(process.argv[1] ?? ""),
+    ]);
+  } else {
+    yield* electronApp.setAsDefaultProtocolClient(scheme);
+  }
+
+  if (environment.platform === "linux") {
+    // Electron's Linux protocol-client registration is desktop-file based;
+    // pairing it with the desktop entry's own name keeps xdg-mime resolution
+    // consistent with the `.desktop` file the packaged build installs (see
+    // build-desktop-artifact.ts's `MimeType: x-scheme-handler/<scheme>`).
+    yield* electronApp.setDesktopName(`${scheme}.desktop`);
+  }
+}).pipe(Effect.withSpan("desktop.startup.registerDeepLinkProtocolClient"));
+
 const bootstrap = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const primaryBackend = yield* pool.primary;
@@ -245,6 +277,7 @@ const startup = Effect.gen(function* () {
     Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
   );
   yield* logStartupInfo("app ready");
+  yield* registerDeepLinkProtocolClient;
   yield* appIdentity.configure;
   yield* applicationMenu.configure;
   yield* updates.configure;

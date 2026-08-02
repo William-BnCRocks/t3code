@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
+import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { getLocalStorageItem } from "../hooks/useLocalStorage";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import { cn, isMacPlatform } from "../lib/utils";
@@ -181,6 +182,28 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       unsubscribe?.();
     };
   }, [navigate, pathname]);
+
+  const { handleNewThread, defaultProjectRef } = useHandleNewThread();
+
+  useEffect(() => {
+    const onDeepLink = window.desktopBridge?.onDeepLink;
+    if (typeof onDeepLink !== "function") {
+      return;
+    }
+
+    const unsubscribe = onDeepLink((link) => {
+      if (link.kind !== "new-thread") return;
+      // No projects registered yet (fresh install with nothing paired) --
+      // there is nowhere to open a draft, so drop the link rather than
+      // throwing on a null projectRef.
+      if (!defaultProjectRef) return;
+      void handleNewThread(defaultProjectRef, link.prompt ? { prefillPrompt: link.prompt } : {});
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [defaultProjectRef, handleNewThread]);
 
   return (
     <SidebarProvider className="h-dvh! min-h-0!" defaultOpen style={sidebarProviderStyle}>

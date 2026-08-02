@@ -958,6 +958,20 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
   input: PreviewAutomationWaitForInput,
 });
 
+/**
+ * Payload pushed to the renderer for an OS-level `t3code://` (or
+ * `t3code-dev://` in development) deep link -- opened via the second-instance
+ * argv, cold-start argv, or the macOS `open-url` event. `prompt` is `null`
+ * when the link carried no `prompt` query param (a bare `t3code://new` still
+ * opens a fresh draft with an empty composer).
+ */
+export interface DesktopDeepLinkNewThreadPayload {
+  readonly kind: "new-thread";
+  readonly prompt: string | null;
+}
+
+export type DesktopDeepLinkPayload = DesktopDeepLinkNewThreadPayload;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   // One bootstrap per pool instance currently registered with bootstrap
@@ -1008,6 +1022,7 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  onDeepLink: (listener: (link: DesktopDeepLinkPayload) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
