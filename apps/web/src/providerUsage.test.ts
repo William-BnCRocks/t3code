@@ -469,6 +469,45 @@ describe("deriveUsageOverview — instance filtering and extras", () => {
   });
 });
 
+describe("deriveUsageOverview — usageLogDir", () => {
+  it("propagates the primary environment's usageLogDir onto the overview", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({ usageLogDir: "/home/dev/.t3/userdata/usage" }),
+        environment({
+          environmentId: EnvironmentId.make("env-secondary"),
+          label: "WSL",
+          isPrimary: false,
+          usageLogDir: "/mnt/wsl/.t3/userdata/usage",
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(overview.usageLogDir).toBe("/home/dev/.t3/userdata/usage");
+  });
+
+  it("is undefined when the primary environment reports none", () => {
+    const overview = deriveUsageOverview([environment()], NOW_MS);
+    expect(overview.usageLogDir).toBeUndefined();
+  });
+
+  it("ignores a non-primary environment's usageLogDir when the primary has none", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment(),
+        environment({
+          environmentId: EnvironmentId.make("env-secondary"),
+          label: "WSL",
+          isPrimary: false,
+          usageLogDir: "/mnt/wsl/.t3/userdata/usage",
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(overview.usageLogDir).toBeUndefined();
+  });
+});
+
 describe("deriveUsageOverview — disconnected environments", () => {
   it("marks a disconnected environment unreachable but still enumerates its instances", () => {
     const overview = deriveUsageOverview(

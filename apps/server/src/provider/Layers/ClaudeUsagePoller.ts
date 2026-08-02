@@ -42,6 +42,10 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 
+import {
+  ProviderUsageLog,
+  ProviderUsageLogLive,
+} from "../../orchestration/Layers/ProviderUsageLog.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   fetchClaudeUsage,
@@ -111,6 +115,7 @@ const activeClaudeInstanceIds = (
 const makeClaudeUsagePoller = (options?: ClaudeUsagePollerLiveOptions) =>
   Effect.gen(function* () {
     const providerRegistry = yield* ProviderRegistry;
+    const providerUsageLog = yield* ProviderUsageLog;
     const serverSettings = yield* ServerSettingsService;
     const providerSessionDirectory = yield* ProviderSessionDirectory;
     const path = yield* Path.Path;
@@ -181,6 +186,15 @@ const makeClaudeUsagePoller = (options?: ClaudeUsagePollerLiveOptions) =>
           instanceId: target.instanceId,
           provider: CLAUDE_DRIVER,
           payload: usageOption.value,
+          observedAt,
+        });
+        // `recordSnapshot` is already fail-open (swallows its own errors
+        // behind a warning log), so a history-write failure never disrupts
+        // polling.
+        yield* providerUsageLog.recordSnapshot({
+          provider: CLAUDE_DRIVER,
+          providerInstanceId: target.instanceId,
+          rateLimits: usageOption.value,
           observedAt,
         });
       }).pipe(
@@ -314,6 +328,15 @@ const makeClaudeUsagePoller = (options?: ClaudeUsagePollerLiveOptions) =>
   });
 
 export const makeClaudeUsagePollerLive = (options?: ClaudeUsagePollerLiveOptions) =>
-  Layer.effect(ClaudeUsagePoller, makeClaudeUsagePoller(options));
+  // `ProviderUsageLogLive` is provided privately here (mirroring
+  // `ProviderRuntimeIngestionLive`'s own private provision in
+  // ProviderRuntimeIngestion.ts), so the poller gets its own `ProviderUsageLog`
+  // instance with its own dedupe map rather than sharing the ingestion tap's.
+  // That's acceptable: dedupe only needs to catch back-to-back identical
+  // writes from the *same* sink, and the shared JSONL file + `source` field
+  // still make the two independently-deduped streams attributable.
+  Layer.effect(ClaudeUsagePoller, makeClaudeUsagePoller(options)).pipe(
+    Layer.provide(ProviderUsageLogLive),
+  );
 
 export const ClaudeUsagePollerLive = makeClaudeUsagePollerLive();

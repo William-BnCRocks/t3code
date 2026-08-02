@@ -449,6 +449,16 @@ export const ServerConfig = Schema.Struct({
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Whether thread subscriptions can emit an opt-in catch-up completion marker. */
   threadResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Absolute path to the directory holding the provider rate-limit usage
+   * history JSONL files (`<stateDir>/usage`) on the machine running this
+   * server. `optionalKey` only for additive wire-safety across client/server
+   * version skew, not because any server omits it — every server has a
+   * `stateDir`. Only meaningful for the client's *local* desktop server: a
+   * remote backend's `usageLogDir` names a path on a different machine, so
+   * clients should only act on it for the primary/local environment.
+   */
+  usageLogDir: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type ServerConfig = typeof ServerConfig.Type;
 

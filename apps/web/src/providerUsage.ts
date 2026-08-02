@@ -111,6 +111,13 @@ export interface UsageOverview {
   readonly showEnvironmentChrome: boolean;
   readonly worst: UsageWorstCandidate | null;
   readonly hasAnyData: boolean;
+  /**
+   * The primary environment's `ServerConfig.usageLogDir`, if it reported
+   * one. Only ever sourced from the primary/local environment — a remote
+   * backend's usage log lives on a different machine, so its directory is
+   * never surfaced here even if present on that environment's input.
+   */
+  readonly usageLogDir: string | undefined;
 }
 
 /** Plain-object environment input, decoupled from the atom-backed presentation type so derivation stays unit-testable. */
@@ -121,6 +128,7 @@ export interface UsageEnvironmentInput {
   readonly phase: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
   readonly providers: ReadonlyArray<ServerProvider>;
+  readonly usageLogDir?: string | undefined;
 }
 
 // ----------------------------------------------------------------------------
@@ -447,6 +455,7 @@ export function deriveUsageOverview(
   );
   const showEnvironmentChrome = environmentViews.length > 1;
   const hasAnyData = environmentViews.some((environment) => environment.instances.length > 0);
+  const usageLogDir = environments.find((environment) => environment.isPrimary)?.usageLogDir;
 
   let worst: UsageWorstCandidate | null = null;
   for (const environment of environmentViews) {
@@ -479,7 +488,7 @@ export function deriveUsageOverview(
     }
   }
 
-  return { environments: environmentViews, showEnvironmentChrome, worst, hasAnyData };
+  return { environments: environmentViews, showEnvironmentChrome, worst, hasAnyData, usageLogDir };
 }
 
 /**
@@ -546,6 +555,7 @@ export function useProviderUsageOverview(): UsageOverview {
         phase: environment.connection.phase,
         connectionError: environment.connection.error,
         providers: environment.serverConfig?.providers ?? [],
+        usageLogDir: environment.serverConfig?.usageLogDir,
       });
     }
 

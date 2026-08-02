@@ -75,11 +75,59 @@ it.layer(NodeServices.layer)("ProviderUsageLog", (it) => {
       assert.strictEqual(lines[0]?.providerInstanceId, "codex_personal");
       assert.strictEqual(lines[0]?.threadId, "thread-1");
       assert.strictEqual(typeof lines[0]?.observedAt, "string");
+      assert.strictEqual(lines[0]?.source, "event");
       assert.deepStrictEqual(lines[0]?.rateLimits, { primary: { usedPercent: 10 } });
 
       assert.strictEqual(lines[1]?.eventId, "evt-rate-limits-2");
+      assert.strictEqual(lines[1]?.source, "event");
       assert.deepStrictEqual(lines[1]?.rateLimits, { primary: { usedPercent: 42 } });
     }).pipe(Effect.provide(testLayer())),
+  );
+
+  it.effect(
+    "recordSnapshot writes one JSON line per distinct payload, sharing dedupe with record",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-03-15T12:00:00.000Z"));
+        const usageLog = yield* ProviderUsageLog;
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+
+        yield* usageLog.recordSnapshot({
+          provider: "codex",
+          providerInstanceId: "codex_personal",
+          rateLimits: { primary: { usedPercent: 10 } },
+          observedAt: "2026-03-15T12:00:00.000Z",
+        });
+        // Identical payload for the same instance key `record` uses: still a
+        // duplicate even though this call comes through the other method.
+        yield* usageLog.record(makeEvent({ eventId: EventId.make("evt-rate-limits-dup") }));
+
+        yield* usageLog.recordSnapshot({
+          provider: "codex",
+          providerInstanceId: "codex_personal",
+          rateLimits: { primary: { usedPercent: 55 } },
+          observedAt: "2026-03-15T12:05:00.000Z",
+        });
+
+        const filePath = path.join(stateDir, "usage", "rate-limits-202603.jsonl");
+        const contents = yield* fs.readFileString(filePath);
+        const lines = readJsonLines(contents);
+
+        assert.strictEqual(lines.length, 2);
+        assert.strictEqual(lines[0]?.source, "poll");
+        assert.strictEqual(lines[0]?.provider, "codex");
+        assert.strictEqual(lines[0]?.providerInstanceId, "codex_personal");
+        assert.strictEqual(lines[0]?.observedAt, "2026-03-15T12:00:00.000Z");
+        assert.deepStrictEqual(lines[0]?.rateLimits, { primary: { usedPercent: 10 } });
+        assert.strictEqual(lines[0]?.eventId, undefined);
+        assert.strictEqual(lines[0]?.threadId, undefined);
+
+        assert.strictEqual(lines[1]?.source, "poll");
+        assert.strictEqual(lines[1]?.observedAt, "2026-03-15T12:05:00.000Z");
+        assert.deepStrictEqual(lines[1]?.rateLimits, { primary: { usedPercent: 55 } });
+      }).pipe(Effect.provide(testLayer())),
   );
 
   it.effect("names the file after the observed month", () =>

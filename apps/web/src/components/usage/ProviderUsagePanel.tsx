@@ -60,6 +60,22 @@ function connectionDotClasses(phase: EnvironmentConnectionPhase): {
   return { dotClassName: "bg-muted-foreground/40", pingClassName: null };
 }
 
+function UsageLogFooter({ usageLogDir }: { usageLogDir: string | undefined }) {
+  const revealArtifact = window.desktopBridge?.preview?.revealArtifact;
+  if (!usageLogDir || !revealArtifact) return null;
+  return (
+    <div className="flex justify-end">
+      <button
+        type="button"
+        className="text-[10px] text-muted-foreground/50 hover:text-foreground"
+        onClick={() => void revealArtifact(usageLogDir)}
+      >
+        Usage history ↗
+      </button>
+    </div>
+  );
+}
+
 function phaseWord(phase: EnvironmentConnectionPhase): string {
   switch (phase) {
     case "connecting":
@@ -312,6 +328,7 @@ export function ProviderUsagePanel(props: ProviderUsagePanelProps) {
           ))}
         </div>
       )}
+      <UsageLogFooter usageLogDir={overview.usageLogDir} />
     </div>
   );
 }
