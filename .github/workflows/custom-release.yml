@@ -1,0 +1,128 @@
+name: Custom Release
+
+# Builds the Windows desktop installer for this fork's `custom/v*` branches
+# (upstream release tag + cherry-picked fixes) and publishes it as a GitHub
+# Release on THIS repository, so custom builds' electron-updater feed
+# (T3CODE_DESKTOP_UPDATE_REPOSITORY below) points here and auto-updates from
+# fork releases instead of upstream's.
+#
+# This intentionally does NOT mirror upstream's release.yml: no signing (no
+# Apple/Azure secrets on this fork), no npm publish, no Vercel/Discord steps,
+# single platform (Windows x64) on a GitHub-hosted runner.
+on:
+  push:
+    branches:
+      - "custom/v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Windows installer and publish release
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+
+      # `corepack pnpm` runs the pnpm version pinned by packageManager
+      # (pnpm@11.10.0) directly, no separate `corepack enable` step needed.
+      - name: Install dependencies
+        run: corepack pnpm install
+
+      # scripts/build-desktop-artifact.ts compiles native/resource-monitor
+      # itself (cargo build --release --target x86_64-pc-windows-msvc) as
+      # part of the desktop build, so the Rust toolchain must be on PATH
+      # before that step runs. windows-latest already ships the MSVC Build
+      # Tools cargo links against.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Resolve build version
+        id: version
+        run: |
+          set -euo pipefail
+          # The branch name carries the upstream base version (custom/vX.Y.Z).
+          # package.json versions are stale on release tags — upstream injects
+          # the real version in CI — so the branch name is the source of truth.
+          if [[ "$GITHUB_REF_NAME" =~ ^custom/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            base_version="${BASH_REMATCH[1]}"
+          else
+            base_version="$(node -p "require('./apps/server/package.json').version")"
+          fi
+          version="${base_version}-custom.${{ github.run_number }}"
+          echo "base=$base_version" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          base_tag="v${{ steps.version.outputs.base }}"
+          notes_file="release-notes.md"
+          {
+            echo "Fork build of upstream $base_tag plus \`${{ github.ref_name }}\`'s cherry-picked fixes."
+            echo
+            if git rev-parse -q --verify "refs/tags/$base_tag" >/dev/null; then
+              echo "Cherry-picks on top of $base_tag:"
+              echo
+              git log --oneline "$base_tag"..HEAD | sed 's/^/- /'
+            else
+              echo "(Base tag $base_tag not found in this checkout; cherry-pick list unavailable.)"
+            fi
+          } > "$notes_file"
+          echo "path=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Build desktop installer
+        env:
+          T3CODE_DESKTOP_VERSION: ${{ steps.version.outputs.version }}
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+          T3CODE_DESKTOP_OUTPUT_DIR: release-publish
+        run: corepack pnpm run dist:desktop:win:x64
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # A release without latest.yml would install once and never update;
+          # fail loudly instead of publishing a broken feed entry.
+          if [ ! -f release-publish/latest.yml ]; then
+            echo "release-publish/latest.yml missing — updater manifest was not produced." >&2
+            exit 1
+          fi
+          installers=(release-publish/*.exe)
+          if [ ${#installers[@]} -eq 0 ]; then
+            echo "No installer found in release-publish/." >&2
+            exit 1
+          fi
+          assets=(release-publish/*.exe release-publish/*.blockmap release-publish/latest.yml)
+
+          # electron-updater only allows prerelease installs on the "nightly"
+          # channel (apps/desktop/src/updates/DesktopUpdates.ts:335,
+          # applyAutoUpdaterChannel: allowsPrerelease = channel === "nightly").
+          # Custom versions (X.Y.Z-custom.N) don't match the nightly pattern,
+          # so resolveDesktopUpdateChannel() resolves "latest" — this release
+          # MUST NOT be --prerelease or installed custom builds will never see
+          # it as an update.
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "T3 Code ${{ steps.version.outputs.version }} (custom)" \
+            --notes-file "${{ steps.notes.outputs.path }}" \
+            --target "${{ github.sha }}" \
+            "${assets[@]}"
