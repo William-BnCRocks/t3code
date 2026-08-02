@@ -37,6 +37,7 @@ import {
   ProviderRuntimeIngestionService,
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
+import { ProviderUsageLog, ProviderUsageLogLive } from "./ProviderUsageLog.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
@@ -693,6 +694,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const providerUsageLog = yield* ProviderUsageLog;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -1292,6 +1294,15 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      // Rate-limit snapshots are account-level telemetry, not thread state:
+      // record them unconditionally, ahead of the thread-shell lookup below,
+      // so a projection that hasn't caught up to this thread yet never drops
+      // the capture. `record` is fail-open on its own, but the ingestion
+      // worker's outer `processInputSafely` catch is a second backstop.
+      if (event.type === "account.rate-limits.updated") {
+        yield* providerUsageLog.record(event);
+      }
+
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
@@ -1828,4 +1839,4 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(Layer.provide(ProjectionTurnRepositoryLive), Layer.provide(ProviderUsageLogLive));

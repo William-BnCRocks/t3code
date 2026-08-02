@@ -23,6 +23,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -192,7 +193,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | ServerConfig,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -218,7 +222,10 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    serverSettings?: Partial<ServerSettings>;
+    baseDir?: string;
+  }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
@@ -240,13 +247,14 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), options?.baseDir ?? process.cwd())),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    const { stateDir } = await runtime.runPromise(Effect.service(ServerConfig));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -316,6 +324,7 @@ describe("ProviderRuntimeIngestion", () => {
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,
+      stateDir,
     };
   }
 
@@ -3476,5 +3485,53 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+
+  it("persists account.rate-limits.updated events into the usage log without projecting a thread activity", async () => {
+    const usageBaseDir = makeTempDir("t3-provider-usage-log-ingestion-");
+    const harness = await createHarness({ baseDir: usageBaseDir });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "account.rate-limits.updated",
+      eventId: asEventId("evt-rate-limits-ingestion"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      payload: {
+        rateLimits: { primary: { usedPercent: 17 } },
+      },
+    });
+
+    await harness.drain();
+
+    // Filename is keyed by the wall-clock observation time (real Clock in
+    // this suite), not by the event's own (possibly stale/replayed) createdAt.
+    const wallClockParts = DateTime.toPartsUtc(DateTime.nowUnsafe());
+    const expectedMonthSuffix = `${wallClockParts.year}${String(wallClockParts.month).padStart(
+      2,
+      "0",
+    )}`;
+    const usageDir = NodePath.join(harness.stateDir, "usage");
+    const usageFiles = NodeFS.readdirSync(usageDir);
+    expect(usageFiles).toEqual([`rate-limits-${expectedMonthSuffix}.jsonl`]);
+    const lines = NodeFS.readFileSync(NodePath.join(usageDir, usageFiles[0]!), "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      eventId: "evt-rate-limits-ingestion",
+      provider: "codex",
+      threadId: "thread-1",
+      rateLimits: { primary: { usedPercent: 17 } },
+    });
+    expect(typeof lines[0]?.observedAt).toBe("string");
+
+    // No thread activity should be projected for account-level telemetry.
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.activities.some((activity) => activity.kind.startsWith("rate-limit"))).toBe(
+      false,
+    );
   });
 });
