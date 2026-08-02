@@ -120,6 +120,52 @@ describe("mergeProviderRateLimits", () => {
     ]);
   });
 
+  it("suppresses the overage window when overage is disabled for the account", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "claudeAgent",
+      payload: {
+        rate_limit_info: {
+          status: "allowed",
+          rateLimitType: "five_hour",
+          utilization: 12,
+          overageStatus: "rejected",
+          overageDisabledReason: "overage_not_provisioned",
+        },
+      },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([{ kind: "five_hour", usedPercent: 12, status: "allowed" }]);
+  });
+
+  it("scrubs a previously accumulated overage window once a disabled reason arrives", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [
+        { kind: "five_hour", usedPercent: 12, status: "allowed" },
+        { kind: "overage", status: "rejected" },
+      ],
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "claudeAgent",
+      payload: {
+        rate_limit_info: {
+          status: "allowed",
+          rateLimitType: "five_hour",
+          utilization: 14,
+          overageStatus: "rejected",
+          overageDisabledReason: "overage_not_provisioned",
+        },
+      },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([{ kind: "five_hour", usedPercent: 14, status: "allowed" }]);
+  });
+
   it("sparse-merges a Codex double-nested update over the previous snapshot (null primary keeps previous)", () => {
     const previous: ServerProviderRateLimits = {
       observedAt: "2026-04-10T00:00:00.000Z",

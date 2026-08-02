@@ -139,11 +139,22 @@ const normalizeClaudeRateLimitInfo = (
     }),
   );
 
+  // A disabled reason (overage_not_provisioned, org_level_disabled, ...)
+  // means the account has no "extra usage" at all — Claude still reports
+  // overageStatus: "rejected" for those, which would render a scary but
+  // meaningless red "limit" row. Suppress the window entirely, and scrub one
+  // accumulated before the disabled reason was first seen. A rejected status
+  // WITHOUT a disabled reason is real (provisioned overage, exhausted) and
+  // stays visible.
+  const overageDisabled = info.overageDisabledReason !== undefined;
   const hasOverageSignal =
     info.isUsingOverage === true ||
+    info.overageInUse === true ||
     info.overageStatus !== undefined ||
     info.overageResetsAt !== undefined;
-  if (hasOverageSignal) {
+  if (overageDisabled) {
+    nextWindows = nextWindows.filter((window) => window.kind !== "overage");
+  } else if (hasOverageSignal) {
     nextWindows = upsertWindow(
       nextWindows,
       buildWindow("overage", {
