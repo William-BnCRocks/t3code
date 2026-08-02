@@ -91,9 +91,12 @@ function buildHeaderSummary(overview: UsageOverview) {
       : usedPercent !== null
         ? formatUsagePercent(usedPercent)
         : "";
+  const resetSuffix =
+    window.resetsAt && !window.isExpired ? formatRelativeTimeUntil(window.resetsAt)?.value : null;
   return (
     <div className={cn("text-[11px] tabular-nums", toneClassForSeverity(severity))}>
       {window.label} {valueText}
+      {resetSuffix ? ` · resets ${resetSuffix}` : ""}
     </div>
   );
 }
