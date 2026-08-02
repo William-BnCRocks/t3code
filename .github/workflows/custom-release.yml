@@ -19,8 +19,48 @@ permissions:
   contents: write
 
 jobs:
+  # node-pty's native binary for the WSL backend must be compiled on Linux so
+  # the Windows artifact ships a ready binary (no first-launch node-gyp on the
+  # user's machine). Mirrors upstream release.yml's build_wsl_node_pty job.
+  # Without it the installed app disables the WSL backend with a "WSL support
+  # is missing from this T3 Code build" error.
+  build-wsl-node-pty:
+    name: Build WSL node-pty (linux-x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+
+      - name: Install dependencies
+        run: corepack pnpm install
+
+      - name: Build node-pty linux-x64 prebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          pty_pkg="$(node -e "console.log(require.resolve('node-pty/package.json', { paths: ['$GITHUB_WORKSPACE/apps/server'] }))")"
+          pty_dir="$(dirname "$pty_pkg")"
+          ( cd "$pty_dir" && npx --yes node-gyp rebuild )
+          mkdir -p wsl-prebuild
+          cp "$pty_dir/build/Release/pty.node" wsl-prebuild/pty.node
+          file wsl-prebuild/pty.node
+
+      - name: Upload node-pty linux-x64 prebuild
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl-node-pty-x64
+          path: wsl-prebuild/pty.node
+          if-no-files-found: error
+
   build-and-release:
     name: Build Windows installer and publish release
+    needs: [build-wsl-node-pty]
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:
@@ -88,11 +128,26 @@ jobs:
           } > "$notes_file"
           echo "path=$notes_file" >> "$GITHUB_OUTPUT"
 
+      - name: Download WSL node-pty prebuild
+        uses: actions/download-artifact@v4
+        with:
+          name: wsl-node-pty-x64
+          path: wsl-prebuild
+
+      - name: Verify WSL prebuild present
+        run: |
+          set -euo pipefail
+          if [ ! -f wsl-prebuild/pty.node ]; then
+            echo "wsl-prebuild/pty.node missing — installer would ship without WSL support." >&2
+            exit 1
+          fi
+
       - name: Build desktop installer
         env:
           T3CODE_DESKTOP_VERSION: ${{ steps.version.outputs.version }}
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
           T3CODE_DESKTOP_OUTPUT_DIR: release-publish
+          T3CODE_DESKTOP_WSL_PREBUILD: ${{ github.workspace }}/wsl-prebuild/pty.node
         run: corepack pnpm run dist:desktop:win:x64
 
       - name: Create GitHub release
