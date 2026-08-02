@@ -172,9 +172,24 @@ function humanizeWindowKind(kind: string): string {
  * already spells the qualifier out as a word, so appending it there would
  * duplicate it (e.g. "Custom Window Opus · Opus").
  */
+const QUALIFIER_BASE_KINDS = ["five_hour", "seven_day", "primary", "secondary"] as const;
+
 function modelQualifierSuffix(kind: string): string | null {
-  if (kind.endsWith("_opus")) return " · Opus";
-  if (kind.endsWith("_sonnet")) return " · Sonnet";
+  for (const base of QUALIFIER_BASE_KINDS) {
+    const prefix = `${base}_`;
+    if (kind.startsWith(prefix) && kind.length > prefix.length) {
+      // Model-scoped windows arrive as `<base>_<slugified model name>`
+      // (e.g. seven_day_opus, seven_day_fable_5). Humanize the slug so two
+      // otherwise-identical "Week" rows read as "Week · Fable 5" etc.
+      const qualifier = kind
+        .slice(prefix.length)
+        .split("_")
+        .filter((token) => token.length > 0)
+        .map((token) => `${token.charAt(0).toUpperCase()}${token.slice(1)}`)
+        .join(" ");
+      return qualifier.length > 0 ? ` · ${qualifier}` : null;
+    }
+  }
   return null;
 }
 
@@ -220,6 +235,17 @@ export function resolveWindowLabels(
   const kindLabel = KIND_LABEL[kind];
   if (kindLabel) {
     return withQualifier(kind, { label: kindLabel, longLabel: KIND_LONG_LABEL[kind] ?? kindLabel });
+  }
+
+  // Model-scoped kinds (`seven_day_fable_5`) miss the exact-kind map; resolve
+  // the base kind's label and let withQualifier append the model name.
+  for (const base of QUALIFIER_BASE_KINDS) {
+    if (kind.startsWith(`${base}_`) && KIND_LABEL[base]) {
+      return withQualifier(kind, {
+        label: KIND_LABEL[base],
+        longLabel: KIND_LONG_LABEL[base] ?? KIND_LABEL[base],
+      });
+    }
   }
 
   const humanized = humanizeWindowKind(kind);
@@ -354,9 +380,14 @@ function deriveInstanceView(entry: ProviderInstanceEntry, nowMs: number): UsageI
 
   const observedAtMs = Date.parse(rateLimits.observedAt);
   const isStale = Number.isFinite(observedAtMs) && nowMs - observedAtMs > USAGE_STALE_AFTER_MS;
-  const windows = sortWindows(rateLimits.windows).map((window) => deriveWindowView(window, nowMs));
+  // Expired blocks are history, not state: they drop out of the panel
+  // entirely (the JSONL usage log keeps them) instead of lingering as dimmed
+  // rows beside the block that replaced them.
+  const windows = sortWindows(rateLimits.windows)
+    .map((window) => deriveWindowView(window, nowMs))
+    .filter((window) => !window.isExpired);
   const worst = windows.reduce<UsageWindowView | null>(
-    (current, window) => (window.isExpired ? current : preferWindow(current, window)),
+    (current, window) => preferWindow(current, window),
     null,
   );
 

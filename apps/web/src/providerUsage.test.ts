@@ -73,6 +73,12 @@ describe("resolveWindowLabels", () => {
     expect(resolveWindowLabels("overage", undefined).label).toBe("Overage");
   });
 
+  it("appends a humanized model qualifier for arbitrary model-scoped weekly kinds", () => {
+    expect(resolveWindowLabels("seven_day_fable_5", undefined).label).toBe("Week · Fable 5");
+    expect(resolveWindowLabels("five_hour_opus", undefined).label).toBe("5h · Opus");
+    expect(resolveWindowLabels("seven_day", undefined).label).toBe("Week");
+  });
+
   it("appends a model qualifier for _opus/_sonnet kind-map hits", () => {
     expect(resolveWindowLabels("seven_day_opus", undefined).label).toBe("Week · Opus");
     expect(resolveWindowLabels("seven_day_sonnet", undefined).label).toBe("Week · Sonnet");
@@ -245,12 +251,12 @@ describe("deriveUsageOverview — expiry", () => {
       ],
       NOW_MS,
     );
-    const [expiredWindow, freshWindow] = overview.environments[0]!.instances[0]!.windows;
-    expect(expiredWindow?.isExpired).toBe(true);
-    expect(expiredWindow?.severity).toBe("ok");
-    // The expired window would otherwise dominate (95%); worst must fall through
-    // to the only non-expired window instead of null.
-    expect(overview.worst?.window.kind).toBe(freshWindow?.kind);
+    // Expired blocks drop out of the panel entirely (the usage log keeps
+    // history); only the live window remains and drives worst.
+    const windows = overview.environments[0]!.instances[0]!.windows;
+    expect(windows).toHaveLength(1);
+    expect(windows[0]?.kind).toBe("seven_day");
+    expect(overview.worst?.window.kind).toBe("seven_day");
   });
 });
 

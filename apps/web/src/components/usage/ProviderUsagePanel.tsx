@@ -112,13 +112,10 @@ function WindowRow({ window }: { window: UsageWindowView }) {
       ? formatUsagePercent(window.usedPercent)
       : "—";
   const valueTone = isRejected ? "text-destructive" : tone;
-  const resetRelative = window.resetsAt
-    ? (formatRelativeTimeUntil(window.resetsAt)?.value ?? "")
-    : "";
-  const resetText = window.isExpired ? "reset" : resetRelative;
+  const resetText = window.resetsAt ? (formatRelativeTimeUntil(window.resetsAt)?.value ?? "") : "";
 
   return (
-    <div className={cn("flex h-4 items-center gap-2", window.isExpired && "opacity-40")}>
+    <div className="flex h-4 items-center gap-2">
       <span className={cn("w-14 shrink-0 truncate text-[11px] leading-4", tone)}>
         {window.label}
       </span>
@@ -138,12 +135,7 @@ function WindowRow({ window }: { window: UsageWindowView }) {
       <span className={cn("w-8 shrink-0 text-right text-[11px] leading-4 tabular-nums", valueTone)}>
         {valueText}
       </span>
-      <span
-        className={cn(
-          "w-11 shrink-0 text-right text-[10px] leading-4 tabular-nums",
-          window.isExpired ? "text-muted-foreground/45" : "text-muted-foreground/50",
-        )}
-      >
+      <span className="w-11 shrink-0 text-right text-[10px] leading-4 tabular-nums text-muted-foreground/50">
         {resetText}
       </span>
     </div>
@@ -165,7 +157,7 @@ function InstanceBlock({ instance, isActive }: { instance: UsageInstanceView; is
     : null;
 
   return (
-    <div className={cn("space-y-1", isActive && "relative")}>
+    <div className={cn("space-y-1", isActive && "relative pl-2")}>
       {isActive ? (
         <span className="absolute inset-y-0 left-0 w-0.5 rounded-r-full bg-primary" aria-hidden />
       ) : null}
