@@ -140,6 +140,10 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   seven_day: "Week",
   seven_day_opus: "Week",
   seven_day_sonnet: "Week",
+  session: "5h",
+  weekly: "Week",
+  weekly_all: "Week",
+  weekly_scoped: "Week",
   overage: "Overage",
   primary: "5h",
   secondary: "Week",
@@ -150,6 +154,10 @@ const KIND_LONG_LABEL: Readonly<Record<string, string>> = {
   seven_day: "Weekly window",
   seven_day_opus: "Weekly window",
   seven_day_sonnet: "Weekly window",
+  session: "5 hour window",
+  weekly: "Weekly window",
+  weekly_all: "Weekly window",
+  weekly_scoped: "Weekly window",
   overage: "Overage",
   primary: "5 hour window",
   secondary: "Weekly window",
@@ -180,7 +188,21 @@ function humanizeWindowKind(kind: string): string {
  * already spells the qualifier out as a word, so appending it there would
  * duplicate it (e.g. "Custom Window Opus · Opus").
  */
-const QUALIFIER_BASE_KINDS = ["five_hour", "seven_day", "primary", "secondary"] as const;
+// Order matters: longer bases first so `weekly_scoped_fable` matches
+// `weekly_scoped` (qualifier "Fable") before the bare `weekly` base would
+// claim `scoped_fable`. `weekly_all`/`weekly_scoped`/`session` are the kinds
+// the live oauth/usage endpoint actually reports (verified from captured
+// responses); the `five_hour`/`seven_day` family comes from the SDK's
+// passive event stream.
+const QUALIFIER_BASE_KINDS = [
+  "weekly_scoped",
+  "weekly",
+  "five_hour",
+  "seven_day",
+  "session",
+  "primary",
+  "secondary",
+] as const;
 
 function modelQualifierSuffix(kind: string): string | null {
   for (const base of QUALIFIER_BASE_KINDS) {

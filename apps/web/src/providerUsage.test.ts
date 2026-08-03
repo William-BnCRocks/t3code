@@ -79,6 +79,15 @@ describe("resolveWindowLabels", () => {
     expect(resolveWindowLabels("seven_day", undefined).label).toBe("Week");
   });
 
+  it("labels the live usage endpoint's session/weekly kinds distinctly", () => {
+    // Kinds observed in real GET /api/oauth/usage responses: session,
+    // weekly_all, and weekly_scoped_<model slug> from scope.model.display_name.
+    expect(resolveWindowLabels("session", 300).label).toBe("5h");
+    expect(resolveWindowLabels("weekly_all", 10_080).label).toBe("Week · All");
+    expect(resolveWindowLabels("weekly_scoped_fable", 10_080).label).toBe("Week · Fable");
+    expect(resolveWindowLabels("weekly_scoped_fable", undefined).label).toBe("Week · Fable");
+  });
+
   it("appends a model qualifier for _opus/_sonnet kind-map hits", () => {
     expect(resolveWindowLabels("seven_day_opus", undefined).label).toBe("Week · Opus");
     expect(resolveWindowLabels("seven_day_sonnet", undefined).label).toBe("Week · Sonnet");
