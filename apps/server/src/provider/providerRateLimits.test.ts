@@ -202,6 +202,29 @@ describe("mergeProviderRateLimits", () => {
     });
   });
 
+  it("derives the Grok billing window length from the period so weekly cycles label as Week", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: {
+        creditUsagePercent: 41,
+        currentPeriod: { start: "2026-08-01T00:00:00.000Z", end: "2026-08-08T00:00:00.000Z" },
+        subscription_tier: "supergrok",
+      },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([
+      {
+        kind: "monthly",
+        usedPercent: 41,
+        resetsAt: "2026-08-08T00:00:00.000Z",
+        windowDurationMins: 7 * 24 * 60,
+      },
+    ]);
+    expect(merged?.planLabel).toBe("Supergrok");
+  });
+
   it("normalizes the flat { primary, secondary } fallback shape identically to Codex nesting", () => {
     const merged = mergeProviderRateLimits({
       previous: undefined,

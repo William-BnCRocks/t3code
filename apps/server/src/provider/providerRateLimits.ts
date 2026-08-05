@@ -408,9 +408,23 @@ const buildGrokMonthlyWindow = (
   const currentPeriod = isRecord(payload.currentPeriod) ? payload.currentPeriod : undefined;
   const resetsAt =
     currentPeriod && isParsableIsoString(currentPeriod.end) ? currentPeriod.end : undefined;
+  // Don't assume the billing cycle is monthly: derive the window length from
+  // the period itself when both bounds parse, so a tier whose allowance runs
+  // on a weekly cycle labels itself "Week" (the UI's duration tier wins over
+  // the kind map). The "monthly" kind remains only the no-period fallback.
+  const startMs =
+    currentPeriod && isParsableIsoString(currentPeriod.start)
+      ? Date.parse(currentPeriod.start)
+      : undefined;
+  const endMs = resetsAt !== undefined ? Date.parse(resetsAt) : undefined;
+  const windowDurationMins =
+    startMs !== undefined && endMs !== undefined && endMs > startMs
+      ? Math.round((endMs - startMs) / 60_000)
+      : undefined;
   return buildWindow("monthly", {
     usedPercent: payload.creditUsagePercent,
     resetsAt,
+    windowDurationMins,
   });
 };
 
