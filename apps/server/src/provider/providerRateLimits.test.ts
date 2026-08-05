@@ -540,3 +540,118 @@ describe("mergeProviderRateLimits — Claude usage pull payload (Shape 2.5)", ()
     expect(claudeEvent?.windows).toEqual([{ kind: "five_hour", usedPercent: 12 }]);
   });
 });
+
+describe("mergeProviderRateLimits — Grok billing payload (Shape 3)", () => {
+  const CURRENT_PERIOD_END = "2026-05-01T00:00:00.000Z";
+
+  const billingPayload = (overrides?: Record<string, unknown>) => ({
+    creditUsagePercent: 37.5,
+    currentPeriod: { end: CURRENT_PERIOD_END, month: "2026-04" },
+    monthlyLimit: 100,
+    onDemandCap: null,
+    onDemandUsed: 0,
+    prepaidBalance: 500,
+    isUnifiedBillingUser: false,
+    billingPeriodStart: "2026-04-01T00:00:00.000Z",
+    billingCycle: "monthly",
+    includedUsed: 37.5,
+    totalUsed: 37.5,
+    on_demand_enabled: false,
+    subscription_tier: "supergrok",
+    ...overrides,
+  });
+
+  it("replaces the snapshot with a single monthly window and a capitalized plan label", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: billingPayload(),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toEqual({
+      observedAt: OBSERVED_AT,
+      windows: [{ kind: "monthly", usedPercent: 37.5, resetsAt: CURRENT_PERIOD_END }],
+      planLabel: "Supergrok",
+    });
+  });
+
+  it("REPLACES a previous non-Grok snapshot rather than merging over it", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "primary", usedPercent: 90 }],
+      planLabel: "Stale Plan",
+      creditsLabel: "Stale Credits",
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: billingPayload(),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([
+      { kind: "monthly", usedPercent: 37.5, resetsAt: CURRENT_PERIOD_END },
+    ]);
+    expect(merged?.planLabel).toBe("Supergrok");
+    expect(merged?.creditsLabel).toBeUndefined();
+  });
+
+  it("omits resetsAt when currentPeriod.end is missing or unparseable", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: billingPayload({ currentPeriod: { end: "not-a-date" } }),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([{ kind: "monthly", usedPercent: 37.5 }]);
+  });
+
+  it("omits planLabel when subscription_tier is absent", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: billingPayload({ subscription_tier: undefined }),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.planLabel).toBeUndefined();
+  });
+
+  it("returns previous unchanged for a garbled billing payload (creditUsagePercent not a number)", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "monthly", usedPercent: 10 }],
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: { creditUsagePercent: "not-a-number", currentPeriod: {} },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toBe(previous);
+  });
+
+  it("is detected via bare currentPeriod presence even without creditUsagePercent", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "monthly", usedPercent: 10 }],
+    };
+
+    // currentPeriod present but creditUsagePercent missing -> still detected
+    // as the Grok billing shape (so it doesn't fall through to the flat
+    // Codex/fallback shape) and correctly treated as garbled -> previous.
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: { currentPeriod: { end: CURRENT_PERIOD_END } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toBe(previous);
+  });
+});

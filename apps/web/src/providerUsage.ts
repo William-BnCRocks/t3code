@@ -147,6 +147,7 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   overage: "Overage",
   primary: "5h",
   secondary: "Week",
+  monthly: "Month",
 };
 
 const KIND_LONG_LABEL: Readonly<Record<string, string>> = {
@@ -161,6 +162,7 @@ const KIND_LONG_LABEL: Readonly<Record<string, string>> = {
   overage: "Overage",
   primary: "5 hour window",
   secondary: "Weekly window",
+  monthly: "Monthly credits",
 };
 
 /**

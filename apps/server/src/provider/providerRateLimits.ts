@@ -26,7 +26,15 @@
  *     array and `planLabel`/`creditsLabel` outright rather than
  *     sparse-merging, so stale carried-over labels never survive a fresh
  *     poll. See `normalizeClaudeUsagePullPayload` for the field mapping.
- *  3. Flat fallback — `{ primary, secondary }` directly (the shape used by
+ *  3. Grok billing — the raw JSON body from `GET /billing?format=credits`
+ *     (the same endpoint the Grok CLI's own `/cost` slash command reads),
+ *     fed by `GrokUsagePoller`. Structurally detected by the presence of
+ *     `creditUsagePercent` or `currentPeriod` — field names unique to this
+ *     shape. Like the Claude pull shape, this is a complete authoritative
+ *     account-state read, not a delta: it REPLACES the entire `windows`
+ *     array and `planLabel` outright with a single `"monthly"` window. See
+ *     `normalizeGrokBillingPayload` for the field mapping.
+ *  4. Flat fallback — `{ primary, secondary }` directly (the shape used by
  *     existing test fixtures): treated identically to Codex's inner
  *     snapshot.
  *
@@ -386,6 +394,61 @@ export const normalizeClaudeUsagePullPayload = (
 };
 
 /**
+ * `payload.currentPeriod.end` -> a monthly window's `resetsAt`, when present
+ * and a parseable ISO string. `currentPeriod` also carries a `month` field
+ * per the field names observed in the `grok` binary, which nothing here maps
+ * (no target in `ServerProviderRateLimitWindow`).
+ */
+const buildGrokMonthlyWindow = (
+  payload: Record<string, unknown>,
+): ServerProviderRateLimitWindow | undefined => {
+  if (!isFiniteNumber(payload.creditUsagePercent)) {
+    return undefined;
+  }
+  const currentPeriod = isRecord(payload.currentPeriod) ? payload.currentPeriod : undefined;
+  const resetsAt =
+    currentPeriod && isParsableIsoString(currentPeriod.end) ? currentPeriod.end : undefined;
+  return buildWindow("monthly", {
+    usedPercent: payload.creditUsagePercent,
+    resetsAt,
+  });
+};
+
+/**
+ * Normalize one raw `GET /billing?format=credits` response body into a
+ * single `"monthly"` window + plan label. Returns `undefined` when
+ * `creditUsagePercent` is missing or not a finite number — callers should
+ * keep `previous` unchanged in that case rather than replacing it with an
+ * empty snapshot.
+ *
+ * `creditsLabel` is intentionally never set here: the response's
+ * `prepaidBalance` field (dollars? cents? "ticks"?) has no confirmed unit —
+ * this environment's billing endpoint was unreachable at authoring time, so
+ * there was no live payload to check against. Rendering a wrong-by-100x
+ * dollar figure is worse than omitting the label, so it's left unmapped
+ * pending a captured response.
+ */
+export const normalizeGrokBillingPayload = (
+  payload: Record<string, unknown>,
+):
+  | { windows: ServerProviderRateLimitWindow[]; planLabel?: string; creditsLabel?: string }
+  | undefined => {
+  const window = buildGrokMonthlyWindow(payload);
+  if (!window) {
+    return undefined;
+  }
+
+  const planLabel = isNonEmptyString(payload.subscription_tier)
+    ? capitalize(payload.subscription_tier)
+    : undefined;
+
+  return {
+    windows: [window],
+    ...(planLabel !== undefined ? { planLabel } : {}),
+  };
+};
+
+/**
  * Fold one raw `event.payload.rateLimits` value onto the previous
  * `ServerProviderRateLimits` snapshot for a provider instance. Detects the
  * raw shape structurally (never solely by `provider` name) and never
@@ -442,7 +505,29 @@ export const mergeProviderRateLimits = (
     };
   }
 
-  // Shape 3: flat fallback — `{ primary, secondary }` directly.
+  // Shape 3: Grok billing — the raw `GET /billing?format=credits` response
+  // body, fed by `GrokUsagePoller`. Detected structurally by the presence of
+  // `creditUsagePercent` or `currentPeriod` (field names unique to this
+  // shape). Authoritative and replaces the whole snapshot with a single
+  // `"monthly"` window (see the module doc comment and
+  // `normalizeGrokBillingPayload`'s doc comment for why); a payload that
+  // fails to yield a usable window falls back to `previous` unchanged so one
+  // garbled poll can't wipe good data.
+  const isGrokBillingShape = "creditUsagePercent" in payload || "currentPeriod" in payload;
+  if (isGrokBillingShape) {
+    const normalized = normalizeGrokBillingPayload(payload);
+    if (normalized === undefined) {
+      return previous;
+    }
+    return {
+      observedAt,
+      windows: normalized.windows,
+      ...(normalized.planLabel !== undefined ? { planLabel: normalized.planLabel } : {}),
+      ...(normalized.creditsLabel !== undefined ? { creditsLabel: normalized.creditsLabel } : {}),
+    };
+  }
+
+  // Shape 4: flat fallback — `{ primary, secondary }` directly.
   if ("primary" in payload || "secondary" in payload) {
     return normalizeCodexSnapshot(previous, observedAt, payload);
   }

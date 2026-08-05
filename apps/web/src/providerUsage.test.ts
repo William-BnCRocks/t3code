@@ -73,6 +73,11 @@ describe("resolveWindowLabels", () => {
     expect(resolveWindowLabels("overage", undefined).label).toBe("Overage");
   });
 
+  it("labels the Grok billing poller's monthly kind", () => {
+    expect(resolveWindowLabels("monthly", undefined).label).toBe("Month");
+    expect(resolveWindowLabels("monthly", undefined).longLabel).toBe("Monthly credits");
+  });
+
   it("appends a humanized model qualifier for arbitrary model-scoped weekly kinds", () => {
     expect(resolveWindowLabels("seven_day_fable_5", undefined).label).toBe("Week · Fable 5");
     expect(resolveWindowLabels("five_hour_opus", undefined).label).toBe("5h · Opus");

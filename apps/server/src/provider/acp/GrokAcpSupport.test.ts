@@ -1,7 +1,12 @@
+import * as NodeOS from "node:os";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
 import * as EffectAcpErrors from "effect-acp/errors";
 
+import { makeGrokEnvironment } from "../Drivers/GrokHome.ts";
 import {
   applyGrokAcpModelSelection,
   buildGrokAcpSpawnInput,
@@ -33,6 +38,26 @@ describe("buildGrokAcpSpawnInput", () => {
       },
     });
   });
+});
+
+it.layer(NodeServices.layer)("buildGrokAcpSpawnInput with a configured GROK_HOME", (it) => {
+  it.effect("lands the resolved GROK_HOME in the spawn env", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const homePath = "~/.grok-work";
+      const resolved = path.resolve(NodeOS.homedir(), ".grok-work");
+
+      const environment = yield* makeGrokEnvironment({ homePath }, { XAI_API_KEY: "secret" });
+      const spawn = buildGrokAcpSpawnInput(
+        { binaryPath: "/usr/local/bin/grok" },
+        "/tmp/project",
+        environment,
+      );
+
+      expect(spawn.env?.GROK_HOME).toBe(resolved);
+      expect(spawn.env?.XAI_API_KEY).toBe("secret");
+    }),
+  );
 });
 
 describe("applyGrokAcpModelSelection", () => {

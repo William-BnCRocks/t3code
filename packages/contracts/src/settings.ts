@@ -340,13 +340,22 @@ export const GrokSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "grok", clearWhenEmpty: "omit" },
       }),
     ),
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "GROK_HOME path",
+        description:
+          "Custom Grok home directory (GROK_HOME). Must be a real directory (not a symlink) seeded with symlinks to the managed install's bin/, downloads/, and bundled/ trees; auth, sessions, and config stay private to it.",
+        providerSettingsForm: { placeholder: "~/.grok", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath"],
+    order: ["binaryPath", "homePath"],
   },
 );
 export type GrokSettings = typeof GrokSettings.Type;
