@@ -167,6 +167,13 @@ export const ServerProviderRateLimitWindow = Schema.Struct({
   resetsAt: Schema.optional(IsoDateTime),
   windowDurationMins: Schema.optional(Schema.Number),
   status: Schema.optional(ServerProviderRateLimitWindowStatus),
+  /**
+   * False when the provider marks this limit as not currently binding (e.g.
+   * Anthropic's model-scoped weekly bucket at 100% while overall usage
+   * spills into the still-open general weekly). Absent means unknown/active.
+   * An inactive window must never drive severity or the summary ring.
+   */
+  isActive: Schema.optional(Schema.Boolean),
 });
 export type ServerProviderRateLimitWindow = typeof ServerProviderRateLimitWindow.Type;
 

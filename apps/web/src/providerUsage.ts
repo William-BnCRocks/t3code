@@ -71,6 +71,8 @@ export interface UsageWindowView {
   readonly usedPercent: number | null;
   readonly resetsAt: string | null;
   readonly isExpired: boolean;
+  /** Null = provider didn't say; false = explicitly not the binding limit right now. */
+  readonly isActive: boolean | null;
   readonly status: ServerProviderRateLimitWindowStatus | null;
   readonly severity: UsageSeverity;
 }
@@ -331,8 +333,14 @@ export function computeWindowSeverity(input: {
   readonly usedPercent: number | null;
   readonly status: ServerProviderRateLimitWindowStatus | null;
   readonly isExpired: boolean;
+  readonly isActive?: boolean;
 }): UsageSeverity {
   if (input.isExpired) return "ok";
+  // The provider says this limit is not currently binding (e.g. a
+  // model-scoped weekly bucket at 100% while usage spills into the open
+  // general weekly). Percent math must not overrule that — a full bar here
+  // is informational, not an emergency.
+  if (input.isActive === false) return "ok";
   if (input.status === "rejected") return "critical";
   const base = severityFromPercent(input.usedPercent);
   if (input.status === "allowed_warning") {
@@ -364,7 +372,12 @@ function deriveWindowView(window: ServerProviderRateLimitWindow, nowMs: number):
   const isExpired = resetsAt !== null && Date.parse(resetsAt) <= nowMs;
   const status = window.status ?? null;
   const usedPercent = window.usedPercent ?? null;
-  const severity = computeWindowSeverity({ usedPercent, status, isExpired });
+  const severity = computeWindowSeverity({
+    usedPercent,
+    status,
+    isExpired,
+    ...(window.isActive !== undefined ? { isActive: window.isActive } : {}),
+  });
   return {
     kind: window.kind,
     label,
@@ -372,6 +385,7 @@ function deriveWindowView(window: ServerProviderRateLimitWindow, nowMs: number):
     usedPercent,
     resetsAt,
     isExpired,
+    isActive: window.isActive ?? null,
     status,
     severity,
   };
@@ -418,8 +432,11 @@ function deriveInstanceView(entry: ProviderInstanceEntry, nowMs: number): UsageI
   const windows = sortWindows(rateLimits.windows)
     .map((window) => deriveWindowView(window, nowMs))
     .filter((window) => !window.isExpired);
+  // Inactive windows (isActive === false) stay visible as rows but never
+  // compete for worst: their severity is forced to "ok" and a 100% inactive
+  // bucket must not outrank an active window on percent tie-breaks either.
   const worst = windows.reduce<UsageWindowView | null>(
-    (current, window) => preferWindow(current, window),
+    (current, window) => (window.isActive === false ? current : preferWindow(current, window)),
     null,
   );
 
@@ -491,6 +508,10 @@ export function deriveUsageOverview(
       if (instance.state !== "ok") continue;
       for (const window of instance.windows) {
         if (window.isExpired) continue;
+        // A provider-declared non-binding limit (isActive === false) must not
+        // drive the ring even on percent tie-breaks — an exhausted inactive
+        // bucket at 100% outranks nothing.
+        if (window.isActive === false) continue;
         const candidateRank = SEVERITY_RANK[window.severity];
         const currentRank = worst ? SEVERITY_RANK[worst.severity] : -1;
         const candidatePercent = window.usedPercent ?? (window.status === "rejected" ? 100 : -1);

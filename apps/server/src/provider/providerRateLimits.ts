@@ -111,6 +111,7 @@ interface WindowFields {
   readonly resetsAt?: string | undefined;
   readonly windowDurationMins?: number | undefined;
   readonly status?: ServerProviderRateLimitWindowStatus | undefined;
+  readonly isActive?: boolean | undefined;
 }
 
 const buildWindow = (kind: string, fields: WindowFields): ServerProviderRateLimitWindow => ({
@@ -121,6 +122,7 @@ const buildWindow = (kind: string, fields: WindowFields): ServerProviderRateLimi
     ? { windowDurationMins: fields.windowDurationMins }
     : {}),
   ...(fields.status !== undefined ? { status: fields.status } : {}),
+  ...(fields.isActive !== undefined ? { isActive: fields.isActive } : {}),
 });
 
 const upsertWindow = (
@@ -320,6 +322,11 @@ const buildWindowFromClaudePullLimitsEntry = (
     resetsAt: isParsableIsoString(entry.resets_at) ? entry.resets_at : undefined,
     windowDurationMins: group ? CLAUDE_PULL_GROUP_DURATION_MINS[group] : undefined,
     status: asClaudePullWindowStatus(entry.severity),
+    // Only an explicit false is meaningful: Anthropic marks non-binding
+    // limits (e.g. an exhausted model-scoped weekly whose usage spills into
+    // the open general weekly) with is_active: false, and the UI must not
+    // paint those critical off raw percent.
+    isActive: entry.is_active === false ? false : undefined,
   });
 };
 

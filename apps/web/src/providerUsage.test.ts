@@ -111,6 +111,41 @@ describe("computeWindowSeverity", () => {
     );
   });
 
+  it("forces inactive windows to ok and keeps them out of worst even at 100%", () => {
+    expect(
+      computeWindowSeverity({
+        usedPercent: 100,
+        status: "allowed",
+        isExpired: false,
+        isActive: false,
+      }),
+    ).toBe("ok");
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [
+                  { kind: "weekly_scoped_fable", usedPercent: 100, isActive: false },
+                  { kind: "weekly_all", usedPercent: 56 },
+                ],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(overview.worst?.window.kind).toBe("weekly_all");
+    const inactive = overview.environments[0]!.instances[0]!.windows.find(
+      (w) => w.kind === "weekly_scoped_fable",
+    );
+    expect(inactive?.severity).toBe("ok");
+  });
+
   it("treats rejected as always critical", () => {
     expect(computeWindowSeverity({ usedPercent: 10, status: "rejected", isExpired: false })).toBe(
       "critical",

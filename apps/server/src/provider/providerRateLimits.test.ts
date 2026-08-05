@@ -432,6 +432,7 @@ describe("mergeProviderRateLimits — Claude usage pull payload (Shape 2.5)", ()
     expect(merged?.windows).toEqual([
       {
         kind: "session",
+        isActive: false,
         usedPercent: 20,
         resetsAt: SESSION_RESETS_AT,
         windowDurationMins: 300,
@@ -439,6 +440,7 @@ describe("mergeProviderRateLimits — Claude usage pull payload (Shape 2.5)", ()
       },
       {
         kind: "weekly_all",
+        isActive: false,
         usedPercent: 45,
         resetsAt: WEEKLY_RESETS_AT,
         windowDurationMins: 10_080,
