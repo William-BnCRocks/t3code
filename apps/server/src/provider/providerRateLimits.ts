@@ -563,9 +563,18 @@ export const mergeProviderRateLimits = (
   // `normalizeGrokBillingPayload`'s doc comment for why); a payload that
   // fails to yield a usable window falls back to `previous` unchanged so one
   // garbled poll can't wipe good data.
-  const isGrokBillingShape = "creditUsagePercent" in payload || "currentPeriod" in payload;
+  // The live agent wraps the billing body one level deeper than the raw
+  // backend response: `{ config: { creditUsagePercent, ... } }` (verified
+  // against `_x.ai/billing` on grok agent stdio). Unwrap before detecting.
+  const grokBillingBody =
+    isRecord(payload.config) &&
+    ("creditUsagePercent" in payload.config || "currentPeriod" in payload.config)
+      ? payload.config
+      : payload;
+  const isGrokBillingShape =
+    "creditUsagePercent" in grokBillingBody || "currentPeriod" in grokBillingBody;
   if (isGrokBillingShape) {
-    const normalized = normalizeGrokBillingPayload(payload);
+    const normalized = normalizeGrokBillingPayload(grokBillingBody);
     if (normalized === undefined) {
       return previous;
     }

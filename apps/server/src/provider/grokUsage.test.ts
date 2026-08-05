@@ -23,11 +23,13 @@ describe("readGrokBillingOverAcp", () => {
       const result = yield* readGrokBillingOverAcp(runtime);
 
       expect(result).toEqual(Option.some({ creditUsagePercent: 12.5 }));
-      expect(calls).toEqual([{ method: "x.ai/billing", payload: {} }]);
+      // Underscore-prefixed method first — the spelling the live agent
+      // actually dispatches (plain x.ai/billing returns Method not found).
+      expect(calls).toEqual([{ method: "_x.ai/billing", payload: {} }]);
     }),
   );
 
-  it.effect('retries with { format: "credits" } when the empty-params attempt fails', () =>
+  it.effect("falls back to the plain method spelling when the underscore form is unsupported", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: string; payload: unknown }> = [];
       const runtime = fakeRuntime((method, payload) => {
@@ -36,19 +38,19 @@ describe("readGrokBillingOverAcp", () => {
           return Effect.fail(
             new EffectAcpErrors.AcpRequestError({
               code: -32601,
-              errorMessage: "Method not supported with empty params",
+              errorMessage: "Method not found",
             }),
           );
         }
-        return Effect.succeed({ creditUsagePercent: 40 });
+        return Effect.succeed({ config: { creditUsagePercent: 40 } });
       });
 
       const result = yield* readGrokBillingOverAcp(runtime);
 
-      expect(result).toEqual(Option.some({ creditUsagePercent: 40 }));
+      expect(result).toEqual(Option.some({ config: { creditUsagePercent: 40 } }));
       expect(calls).toEqual([
+        { method: "_x.ai/billing", payload: {} },
         { method: "x.ai/billing", payload: {} },
-        { method: "x.ai/billing", payload: { format: "credits" } },
       ]);
     }),
   );

@@ -88,7 +88,14 @@ const GROK_BILLING_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // update kinds through one JSON-RPC method — most notifications on this
 // method will not carry the retry-state signal `extractXAiRetryStateSignal`
 // looks for, which is the common case, not an error.
-const GROK_SESSION_NOTIFICATION_METHOD = "x.ai/session_notification";
+// Both spellings, mirroring ask_user_question's registration: the live agent
+// currently dispatches ext methods under the underscore prefix (verified via
+// _x.ai/billing vs x.ai/billing on grok agent stdio), so the notification
+// most likely arrives underscore-prefixed too.
+const GROK_SESSION_NOTIFICATION_METHODS = [
+  "_x.ai/session_notification",
+  "x.ai/session_notification",
+] as const;
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -684,36 +691,38 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             // only ever surfaces as this in-session signal. See
             // `XAiAcpExtension.ts` for the field-mapping and gating
             // uncertainty notes.
-            yield* acp.handleExtNotification(
-              GROK_SESSION_NOTIFICATION_METHOD,
-              Schema.Unknown,
-              (params) =>
-                mapAcpCallbackFailure(
-                  Effect.gen(function* () {
-                    yield* logNative(input.threadId, GROK_SESSION_NOTIFICATION_METHOD, params);
-                    const retryState = extractXAiRetryStateSignal(params);
-                    if (!retryState || !xAiRetryStateIsWeeklyLimitSignal(retryState)) {
-                      return;
-                    }
-                    yield* offerRuntimeEvent({
-                      type: "account.rate-limits.updated",
-                      ...(yield* makeEventStamp()),
-                      provider: PROVIDER,
-                      threadId: input.threadId,
-                      payload: {
-                        rateLimits: {
-                          retry_state: {
-                            is_rate_limited: true,
-                            ...(retryState.errorType !== undefined
-                              ? { error_type: retryState.errorType }
-                              : {}),
+            for (const sessionNotificationMethod of GROK_SESSION_NOTIFICATION_METHODS) {
+              yield* acp.handleExtNotification(
+                sessionNotificationMethod,
+                Schema.Unknown,
+                (params) =>
+                  mapAcpCallbackFailure(
+                    Effect.gen(function* () {
+                      yield* logNative(input.threadId, sessionNotificationMethod, params);
+                      const retryState = extractXAiRetryStateSignal(params);
+                      if (!retryState || !xAiRetryStateIsWeeklyLimitSignal(retryState)) {
+                        return;
+                      }
+                      yield* offerRuntimeEvent({
+                        type: "account.rate-limits.updated",
+                        ...(yield* makeEventStamp()),
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        payload: {
+                          rateLimits: {
+                            retry_state: {
+                              is_rate_limited: true,
+                              ...(retryState.errorType !== undefined
+                                ? { error_type: retryState.errorType }
+                                : {}),
+                            },
                           },
                         },
-                      },
-                    });
-                  }),
-                ),
-            );
+                      });
+                    }),
+                  ),
+              );
+            }
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {

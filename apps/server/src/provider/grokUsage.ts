@@ -42,8 +42,16 @@ import type * as EffectAcpErrors from "effect-acp/errors";
 
 import type * as AcpSessionRuntime from "./acp/AcpSessionRuntime.ts";
 
-/** ACP extension request method for Grok's billing/credit read. */
-const GROK_BILLING_METHOD = "x.ai/billing";
+/**
+ * ACP extension request methods for Grok's billing/credit read, in
+ * preference order. The underscore-prefixed form is what the agent actually
+ * dispatches today — verified live against `grok agent stdio`, where
+ * `x.ai/billing` returns -32601 "Method not found" while `_x.ai/billing`
+ * answers with the billing config. The plain form is kept as a fallback for
+ * the day xAI stabilizes the method name (their `ask_user_question`
+ * extension already ships both spellings).
+ */
+const GROK_BILLING_METHODS = ["_x.ai/billing", "x.ai/billing"] as const;
 const GROK_BILLING_TIMEOUT_MS = 10_000;
 
 /**
@@ -57,19 +65,21 @@ const GROK_BILLING_TIMEOUT_MS = 10_000;
  */
 const requestGrokBilling = (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
+  method: string,
   payload: unknown,
 ): Effect.Effect<Option.Option<unknown>> =>
-  runtime.request(GROK_BILLING_METHOD, payload).pipe(
+  runtime.request(method, payload).pipe(
     Effect.timeoutOption(GROK_BILLING_TIMEOUT_MS),
     Effect.flatMap((result) =>
       Option.isNone(result)
-        ? Effect.logDebug("grok x.ai/billing ext request timed out", { payload }).pipe(
+        ? Effect.logDebug("grok billing ext request timed out", { method, payload }).pipe(
             Effect.as(Option.none<unknown>()),
           )
         : Effect.succeed(Option.some<unknown>(result.value)),
     ),
     Effect.catch((error: EffectAcpErrors.AcpError) =>
-      Effect.logDebug("grok x.ai/billing ext request failed", {
+      Effect.logDebug("grok billing ext request failed", {
+        method,
         payload,
         error: error.message,
       }).pipe(Effect.as(Option.none<unknown>())),
@@ -78,19 +88,21 @@ const requestGrokBilling = (
 
 /**
  * Read Grok account billing/credit telemetry over an active `grok agent
- * stdio` ACP connection. Tries an empty params object first (the CLI's own
- * client is not confirmed to require any particular shape); if the agent
- * rejects that, retries once with `{ format: "credits" }` (the query string
- * the CLI's now-removed HTTP path used) before giving up. Fail-open on every
- * path: returns `Option.none()` for an unsupported method, a timeout, or a
- * malformed/rejected response — never throws.
+ * stdio` ACP connection. Empty params suffice (verified live). Tries each
+ * method spelling in `GROK_BILLING_METHODS` order. Fail-open on every path:
+ * returns `Option.none()` for an unsupported method, a timeout, or a
+ * malformed/rejected response — never throws. The response body arrives
+ * wrapped as `{ config: { creditUsagePercent, currentPeriod, ... } }`; the
+ * normalizer unwraps it.
  */
 export const readGrokBillingOverAcp = Effect.fn("readGrokBillingOverAcp")(function* (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
 ): Effect.fn.Return<Option.Option<unknown>, never, never> {
-  const withEmptyParams = yield* requestGrokBilling(runtime, {});
-  if (Option.isSome(withEmptyParams)) {
-    return withEmptyParams;
+  for (const method of GROK_BILLING_METHODS) {
+    const response = yield* requestGrokBilling(runtime, method, {});
+    if (Option.isSome(response)) {
+      return response;
+    }
   }
-  return yield* requestGrokBilling(runtime, { format: "credits" });
+  return Option.none();
 });

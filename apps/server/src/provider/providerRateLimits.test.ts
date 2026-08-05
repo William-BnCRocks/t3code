@@ -225,6 +225,38 @@ describe("mergeProviderRateLimits", () => {
     expect(merged?.planLabel).toBe("Supergrok");
   });
 
+  it("unwraps the live agent's { config } billing envelope with a weekly period", () => {
+    // Shape captured verbatim from `_x.ai/billing` on grok agent stdio.
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: {
+        config: {
+          creditUsagePercent: 7.0,
+          currentPeriod: {
+            type: "USAGE_PERIOD_TYPE_WEEKLY",
+            start: "2026-07-31T02:41:05.713506+00:00",
+            end: "2026-08-07T02:41:05.713506+00:00",
+          },
+          onDemandCap: { val: 0 },
+          onDemandUsed: { val: 0 },
+          prepaidBalance: { val: 0 },
+          isUnifiedBillingUser: true,
+        },
+      },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([
+      {
+        kind: "monthly",
+        usedPercent: 7,
+        resetsAt: "2026-08-07T02:41:05.713506+00:00",
+        windowDurationMins: 7 * 24 * 60,
+      },
+    ]);
+  });
+
   it("normalizes the flat { primary, secondary } fallback shape identically to Codex nesting", () => {
     const merged = mergeProviderRateLimits({
       previous: undefined,
