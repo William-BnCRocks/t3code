@@ -678,3 +678,94 @@ describe("mergeProviderRateLimits — Grok billing payload (Shape 3)", () => {
     expect(merged).toBe(previous);
   });
 });
+
+describe("mergeProviderRateLimits — Grok weekly-limit session signal (Shape 5)", () => {
+  it("upserts a rejected weekly window, additive over an existing monthly window", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "monthly", usedPercent: 37.5, resetsAt: "2026-05-01T00:00:00.000Z" }],
+      planLabel: "Supergrok",
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: {
+        retry_state: { is_rate_limited: true, exhausted: true, error_type: "rate_limited" },
+      },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toEqual({
+      observedAt: OBSERVED_AT,
+      windows: [
+        { kind: "monthly", usedPercent: 37.5, resetsAt: "2026-05-01T00:00:00.000Z" },
+        { kind: "weekly", status: "rejected" },
+      ],
+      planLabel: "Supergrok",
+    });
+  });
+
+  it("creates a standalone rejected weekly window when there is no previous snapshot", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: { retry_state: { is_rate_limited: true, exhausted: true } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toEqual({
+      observedAt: OBSERVED_AT,
+      windows: [{ kind: "weekly", status: "rejected" }],
+    });
+  });
+
+  it("accepts camelCase isRateLimited as a fallback", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: { retry_state: { isRateLimited: true } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([{ kind: "weekly", status: "rejected" }]);
+  });
+
+  it("overwrites a previously-rejected weekly window rather than duplicating it", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [
+        { kind: "monthly", usedPercent: 10 },
+        { kind: "weekly", status: "rejected" },
+      ],
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: { retry_state: { is_rate_limited: true } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([
+      { kind: "monthly", usedPercent: 10 },
+      { kind: "weekly", status: "rejected" },
+    ]);
+  });
+
+  it("returns previous unchanged when retry_state doesn't carry a truthy is_rate_limited signal", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "monthly", usedPercent: 10 }],
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: { retry_state: { is_rate_limited: false, attempt: 1 } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toBe(previous);
+  });
+});

@@ -26,9 +26,10 @@
  *     array and `planLabel`/`creditsLabel` outright rather than
  *     sparse-merging, so stale carried-over labels never survive a fresh
  *     poll. See `normalizeClaudeUsagePullPayload` for the field mapping.
- *  3. Grok billing — the raw JSON body from `GET /billing?format=credits`
- *     (the same endpoint the Grok CLI's own `/cost` slash command reads),
- *     fed by `GrokUsagePoller`. Structurally detected by the presence of
+ *  3. Grok billing — the raw JSON body from the ACP extension request
+ *     `x.ai/billing` on a live `grok agent stdio` session (see
+ *     `grokUsage.readGrokBillingOverAcp`, polled per-session by
+ *     `GrokAdapter`). Structurally detected by the presence of
  *     `creditUsagePercent` or `currentPeriod` — field names unique to this
  *     shape. Like the Claude pull shape, this is a complete authoritative
  *     account-state read, not a delta: it REPLACES the entire `windows`
@@ -37,6 +38,16 @@
  *  4. Flat fallback — `{ primary, secondary }` directly (the shape used by
  *     existing test fixtures): treated identically to Codex's inner
  *     snapshot.
+ *  5. Grok weekly-limit session signal — `{ retry_state: { is_rate_limited,
+ *     error_type, ... } }`, synthesized by `GrokAdapter` when a live ACP
+ *     session observes xAI's `RetryState` signal with `is_rate_limited` and
+ *     `exhausted` both true (see `GrokAdapter.ts` and `XAiAcpExtension.ts`).
+ *     Grok's weekly limit has no queryable HTTP/ACP source — it only ever
+ *     appears as this in-session signal — so unlike shape 3 this is NOT an
+ *     authoritative full-account read: it additively upserts a single
+ *     `"weekly"` window over `previous`, leaving the monthly credits window
+ *     and any labels untouched. See `normalizeGrokRetryStateSignal` for the
+ *     field mapping.
  *
  * This module never throws: malformed or unrecognized payloads fall back to
  * the previous snapshot (or `undefined` when there is none) so a single bad
@@ -463,6 +474,30 @@ export const normalizeGrokBillingPayload = (
 };
 
 /**
+ * `payload.retry_state` -> a sparse `"weekly"` window patch, or `undefined`
+ * when the object doesn't carry a truthy rate-limited signal. Accepts both
+ * the snake_case field names extracted from the `grok` binary's embedded
+ * serde strings (`is_rate_limited`, `exhausted`) and a camelCase fallback,
+ * since this environment never captured a live payload to confirm wire
+ * casing. Only `exhausted && is_rate_limited` both true counts as the
+ * signal: a `retry_state` seen mid-backoff (rate-limited but still retrying)
+ * is not yet a confirmed "you hit your weekly limit" rejection — see
+ * `xAiRetryStateIsWeeklyLimitSignal` in `XAiAcpExtension.ts`, which applies
+ * the same gate before `GrokAdapter` ever emits this shape. `resetsAt` is
+ * never set: xAI's `RetryState` carries no reset timestamp.
+ */
+const normalizeGrokRetryStateSignal = (raw: unknown): WindowFields | undefined => {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const isRateLimited = raw.is_rate_limited ?? raw.isRateLimited;
+  if (isRateLimited !== true) {
+    return undefined;
+  }
+  return { status: "rejected" };
+};
+
+/**
  * Fold one raw `event.payload.rateLimits` value onto the previous
  * `ServerProviderRateLimits` snapshot for a provider instance. Detects the
  * raw shape structurally (never solely by `provider` name) and never
@@ -519,10 +554,11 @@ export const mergeProviderRateLimits = (
     };
   }
 
-  // Shape 3: Grok billing — the raw `GET /billing?format=credits` response
-  // body, fed by `GrokUsagePoller`. Detected structurally by the presence of
-  // `creditUsagePercent` or `currentPeriod` (field names unique to this
-  // shape). Authoritative and replaces the whole snapshot with a single
+  // Shape 3: Grok billing — the raw ACP `x.ai/billing` response body, read
+  // per-session by `GrokAdapter` (see `grokUsage.readGrokBillingOverAcp`).
+  // Detected structurally by the presence of `creditUsagePercent` or
+  // `currentPeriod` (field names unique to this shape). Authoritative and
+  // replaces the whole snapshot with a single
   // `"monthly"` window (see the module doc comment and
   // `normalizeGrokBillingPayload`'s doc comment for why); a payload that
   // fails to yield a usable window falls back to `previous` unchanged so one
@@ -544,6 +580,26 @@ export const mergeProviderRateLimits = (
   // Shape 4: flat fallback — `{ primary, secondary }` directly.
   if ("primary" in payload || "secondary" in payload) {
     return normalizeCodexSnapshot(previous, observedAt, payload);
+  }
+
+  // Shape 5: Grok weekly-limit session signal — `{ retry_state: {...} }`,
+  // synthesized by `GrokAdapter` from xAI's in-session `RetryState` signal
+  // (see the module doc comment and `normalizeGrokRetryStateSignal`'s doc
+  // comment for why this is additive rather than authoritative-replace like
+  // shape 3). A `retry_state` object that doesn't carry a confirmed
+  // rate-limited signal falls back to `previous` unchanged.
+  if (isRecord(payload.retry_state)) {
+    const patch = normalizeGrokRetryStateSignal(payload.retry_state);
+    if (patch === undefined) {
+      return previous;
+    }
+    const windows = upsertWindow(previous?.windows ?? [], buildWindow("weekly", patch));
+    return {
+      observedAt,
+      windows,
+      ...(previous?.planLabel !== undefined ? { planLabel: previous.planLabel } : {}),
+      ...(previous?.creditsLabel !== undefined ? { creditsLabel: previous.creditsLabel } : {}),
+    };
   }
 
   return previous;

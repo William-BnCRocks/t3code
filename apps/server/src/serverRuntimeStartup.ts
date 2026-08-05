@@ -35,7 +35,6 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import * as ClaudeUsagePoller from "./provider/Services/ClaudeUsagePoller.ts";
-import * as GrokUsagePoller from "./provider/Services/GrokUsagePoller.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -296,7 +295,6 @@ export const make = Effect.gen(function* () {
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
   const claudeUsagePoller = yield* ClaudeUsagePoller.ClaudeUsagePoller;
-  const grokUsagePoller = yield* GrokUsagePoller.GrokUsagePoller;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -348,7 +346,6 @@ export const make = Effect.gen(function* () {
         yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
         yield* claudeUsagePoller.start().pipe(Scope.provide(reactorScope));
-        yield* grokUsagePoller.start().pipe(Scope.provide(reactorScope));
       }),
     );
 

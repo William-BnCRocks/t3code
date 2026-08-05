@@ -64,6 +64,101 @@ function trimmed(value: string | undefined): string | undefined {
   return text && text.length > 0 ? text : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readBooleanField(
+  record: Record<string, unknown>,
+  ...keys: ReadonlyArray<string>
+): boolean | undefined {
+  for (const key of keys) {
+    if (typeof record[key] === "boolean") {
+      return record[key] as boolean;
+    }
+  }
+  return undefined;
+}
+
+function readStringField(
+  record: Record<string, unknown>,
+  ...keys: ReadonlyArray<string>
+): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * xAI's `RetryState` signal, extracted from an `x.ai/session_notification`
+ * extension notification (method confirmed against the `grok` CLI's own
+ * embedded docs table: "Session-specific updates (diff review, retry state,
+ * auto-compact)"; field names confirmed against the binary's embedded serde
+ * strings — `attempt`, `max_retries`, `exhausted`, `is_rate_limited`,
+ * `error_type` — but the wire casing and envelope shape are unconfirmed
+ * against a live payload, since this environment never captured one).
+ */
+export interface XAiRetryStateSignal {
+  readonly isRateLimited: boolean;
+  readonly exhausted: boolean;
+  readonly errorType?: string;
+  readonly attempt?: number;
+  readonly maxRetries?: number;
+}
+
+/**
+ * Extract an `XAiRetryStateSignal` from an `x.ai/session_notification`
+ * notification's params, if present. The CLI multiplexes several unrelated
+ * update kinds (diff review, auto-compact, memory flush, ...) through this
+ * one method via an internally-tagged Rust enum, so most notifications on
+ * this method will not carry a retry-state signal at all — that's the
+ * common case, not an error, and returns `undefined`. Accepts the object
+ * either at the notification's top level or nested under a
+ * `retry_state`/`retryState` key (envelope shape unconfirmed — see the
+ * `XAiRetryStateSignal` doc comment), and both snake_case (confirmed) and
+ * camelCase (unconfirmed) field casing. Never throws.
+ */
+export function extractXAiRetryStateSignal(params: unknown): XAiRetryStateSignal | undefined {
+  if (!isRecord(params)) {
+    return undefined;
+  }
+  const nested = isRecord(params.retry_state)
+    ? params.retry_state
+    : isRecord(params.retryState)
+      ? params.retryState
+      : params;
+  const isRateLimited = readBooleanField(nested, "is_rate_limited", "isRateLimited");
+  if (isRateLimited === undefined) {
+    return undefined;
+  }
+  const exhausted = readBooleanField(nested, "exhausted") ?? false;
+  const errorType = readStringField(nested, "error_type", "errorType");
+  const attemptRaw = nested.attempt;
+  const maxRetriesRaw = nested.max_retries ?? nested.maxRetries;
+  return {
+    isRateLimited,
+    exhausted,
+    ...(errorType !== undefined ? { errorType } : {}),
+    ...(typeof attemptRaw === "number" ? { attempt: attemptRaw } : {}),
+    ...(typeof maxRetriesRaw === "number" ? { maxRetries: maxRetriesRaw } : {}),
+  };
+}
+
+/**
+ * Whether an extracted retry-state signal represents a confirmed
+ * weekly-limit rejection: rate-limited AND the CLI's own retry loop gave up
+ * (`exhausted`). A `retry_state` seen mid-backoff (rate-limited but still
+ * retrying, not yet exhausted) is deliberately not treated as a hard
+ * rejection — it may still succeed on the next attempt.
+ */
+export function xAiRetryStateIsWeeklyLimitSignal(signal: XAiRetryStateSignal): boolean {
+  return signal.isRateLimited && signal.exhausted;
+}
+
 function unwrapAskUserQuestionParams(
   params: XAiAskUserQuestionRequest,
 ): XAiAskUserQuestionRequestParams {

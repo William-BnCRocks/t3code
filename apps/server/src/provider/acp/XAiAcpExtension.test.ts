@@ -10,9 +10,11 @@ import { describe, expect } from "vite-plus/test";
 
 import {
   extractXAiAskUserQuestions,
+  extractXAiRetryStateSignal,
   makeXAiAskUserQuestionCancelledResponse,
   makeXAiAskUserQuestionResponse,
   makeXAiPromptCompletionRuntime,
+  xAiRetryStateIsWeeklyLimitSignal,
   XAiAskUserQuestionRequest,
 } from "./XAiAcpExtension.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
@@ -329,4 +331,62 @@ describe("XAiAcpExtension", () => {
       });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  describe("extractXAiRetryStateSignal / xAiRetryStateIsWeeklyLimitSignal", () => {
+    it("extracts a top-level retry-state signal (snake_case fields)", () => {
+      const signal = extractXAiRetryStateSignal({
+        is_rate_limited: true,
+        exhausted: true,
+        error_type: "rate_limited",
+        attempt: 3,
+        max_retries: 3,
+      });
+
+      expect(signal).toEqual({
+        isRateLimited: true,
+        exhausted: true,
+        errorType: "rate_limited",
+        attempt: 3,
+        maxRetries: 3,
+      });
+      expect(xAiRetryStateIsWeeklyLimitSignal(signal!)).toBe(true);
+    });
+
+    it("extracts a nested retry_state signal", () => {
+      const signal = extractXAiRetryStateSignal({
+        sessionId: "session-1",
+        retry_state: { is_rate_limited: true, exhausted: false },
+      });
+
+      expect(signal).toEqual({ isRateLimited: true, exhausted: false });
+      // Rate-limited but not yet exhausted: still mid-backoff, not a
+      // confirmed weekly-limit rejection.
+      expect(xAiRetryStateIsWeeklyLimitSignal(signal!)).toBe(false);
+    });
+
+    it("extracts a nested retryState signal (camelCase envelope + fields)", () => {
+      const signal = extractXAiRetryStateSignal({
+        retryState: { isRateLimited: true, exhausted: true, errorType: "rate_limited" },
+      });
+
+      expect(signal).toEqual({ isRateLimited: true, exhausted: true, errorType: "rate_limited" });
+      expect(xAiRetryStateIsWeeklyLimitSignal(signal!)).toBe(true);
+    });
+
+    it("returns undefined for unrelated x.ai/session_notification payloads (diff review, auto-compact, ...)", () => {
+      expect(extractXAiRetryStateSignal({ diff_review: { path: "foo.ts" } })).toBeUndefined();
+      expect(
+        extractXAiRetryStateSignal({ auto_compact_started: { tokens_used: 1000 } }),
+      ).toBeUndefined();
+      expect(extractXAiRetryStateSignal(null)).toBeUndefined();
+      expect(extractXAiRetryStateSignal("not an object")).toBeUndefined();
+    });
+
+    it("defaults exhausted to false when the field is missing", () => {
+      const signal = extractXAiRetryStateSignal({ is_rate_limited: true });
+
+      expect(signal).toEqual({ isRateLimited: true, exhausted: false });
+      expect(xAiRetryStateIsWeeklyLimitSignal(signal!)).toBe(false);
+    });
+  });
 });

@@ -15,6 +15,7 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -23,6 +24,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -35,6 +37,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { readGrokBillingOverAcp } from "../grokUsage.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -61,9 +64,11 @@ import {
 } from "../acp/GrokAcpSupport.ts";
 import {
   extractXAiAskUserQuestions,
+  extractXAiRetryStateSignal,
   makeXAiAskUserQuestionCancelledResponse,
   makeXAiAskUserQuestionResponse,
   promptResponseHasMissingXAiStopReason,
+  xAiRetryStateIsWeeklyLimitSignal,
   XAiAskUserQuestionRequest,
 } from "../acp/XAiAcpExtension.ts";
 import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
@@ -73,6 +78,17 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJ
 
 const PROVIDER = ProviderDriverKind.make("grok");
 const GROK_RESUME_VERSION = 1 as const;
+// Mirrors the deleted `GrokUsagePoller`'s default sweep interval — the
+// billing read now runs per live session (see `startSession`) instead of a
+// standalone server-wide poller; see that call site's doc comment for why.
+const GROK_BILLING_POLL_INTERVAL_MS = 5 * 60 * 1000;
+// Method name for xAI's session-notification extension, confirmed against
+// the `grok` CLI's own embedded docs table: "Session-specific updates (diff
+// review, retry state, auto-compact)". It multiplexes several unrelated
+// update kinds through one JSON-RPC method — most notifications on this
+// method will not carry the retry-state signal `extractXAiRetryStateSignal`
+// looks for, which is the common case, not an error.
+const GROK_SESSION_NOTIFICATION_METHOD = "x.ai/session_notification";
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -663,6 +679,41 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 ),
               { discard: true },
             );
+            // Grok's weekly usage limit has no queryable HTTP/ACP read (per
+            // xAI, unlike the monthly credits window polled below) — it
+            // only ever surfaces as this in-session signal. See
+            // `XAiAcpExtension.ts` for the field-mapping and gating
+            // uncertainty notes.
+            yield* acp.handleExtNotification(
+              GROK_SESSION_NOTIFICATION_METHOD,
+              Schema.Unknown,
+              (params) =>
+                mapAcpCallbackFailure(
+                  Effect.gen(function* () {
+                    yield* logNative(input.threadId, GROK_SESSION_NOTIFICATION_METHOD, params);
+                    const retryState = extractXAiRetryStateSignal(params);
+                    if (!retryState || !xAiRetryStateIsWeeklyLimitSignal(retryState)) {
+                      return;
+                    }
+                    yield* offerRuntimeEvent({
+                      type: "account.rate-limits.updated",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      payload: {
+                        rateLimits: {
+                          retry_state: {
+                            is_rate_limited: true,
+                            ...(retryState.errorType !== undefined
+                              ? { error_type: retryState.errorType }
+                              : {}),
+                          },
+                        },
+                      },
+                    });
+                  }),
+                ),
+            );
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
@@ -882,6 +933,43 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
           sessionScopeTransferred = true;
+
+          // Grok's monthly credits window IS queryable over ACP (unlike the
+          // weekly signal handled above): poll it once immediately, then
+          // every `GROK_BILLING_POLL_INTERVAL_MS` for as long as this
+          // session's ACP connection lives. Forked into `sessionScope`
+          // (not the ambient scope of this `startSession` call) so it is
+          // automatically interrupted when the session stops, mirroring how
+          // `stopSessionInternal` closes `ctx.scope`. There is deliberately
+          // no server-wide poller anymore (see the deleted
+          // `GrokUsagePoller`/`grokUsage.fetchGrokUsage`): only a live
+          // session has an authenticated ACP connection to read billing
+          // over, so the read now rides the session's own lifecycle instead
+          // of the old poller's independent "which instances are
+          // configured" sweep. A side effect: N concurrent sessions on the
+          // same Grok instance each poll independently rather than sharing
+          // one sweep — accepted as a minor, harmless redundancy (the read
+          // is a cheap JSON-RPC round trip, and results are idempotent)
+          // rather than adding cross-session coordination for it.
+          yield* Effect.gen(function* () {
+            const bodyOption = yield* readGrokBillingOverAcp(ctx.acp);
+            if (Option.isNone(bodyOption)) {
+              return;
+            }
+            yield* offerRuntimeEvent({
+              type: "account.rate-limits.updated",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              payload: { rateLimits: bodyOption.value },
+            });
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logDebug("grok billing poll failed", { threadId: input.threadId, cause }),
+            ),
+            Effect.repeat(Schedule.spaced(Duration.millis(GROK_BILLING_POLL_INTERVAL_MS))),
+            Effect.forkIn(sessionScope),
+          );
 
           yield* offerRuntimeEvent({
             type: "session.started",
