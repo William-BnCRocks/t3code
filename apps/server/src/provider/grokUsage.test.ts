@@ -55,6 +55,29 @@ describe("readGrokBillingOverAcp", () => {
     }),
   );
 
+  it.effect("remembers the working method for a connection and reuses it on later reads", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const runtime = fakeRuntime((method) => {
+        calls.push(method);
+        return method === "_x.ai/billing"
+          ? Effect.succeed({ config: { creditUsagePercent: 5 } })
+          : Effect.fail(
+              new EffectAcpErrors.AcpRequestError({
+                code: -32601,
+                errorMessage: "Method not found",
+              }),
+            );
+      });
+
+      yield* readGrokBillingOverAcp(runtime);
+      yield* readGrokBillingOverAcp(runtime);
+
+      // Second read goes straight to the remembered spelling.
+      expect(calls).toEqual(["_x.ai/billing", "_x.ai/billing"]);
+    }),
+  );
+
   it.effect("returns None (never throws) when both attempts fail", () =>
     Effect.gen(function* () {
       const runtime = fakeRuntime(() =>

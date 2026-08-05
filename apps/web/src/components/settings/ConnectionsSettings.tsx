@@ -1362,6 +1362,14 @@ function SavedBackendListRow({
   // WSL on/off + distro picker on this page.
   const isWslEnvironment = isDesktopLocalConnectionTarget(environment.entry.target);
 
+  // Client-side display preference, not a server action: hiding an
+  // environment's threads from the v2 sidebar never touches the backend, and
+  // is reversible from here or from the sidebar's own "N hidden" affordance.
+  const isHiddenFromSidebar = useUiStateStore((state) =>
+    state.hiddenEnvironmentIds.includes(environmentId),
+  );
+  const setEnvironmentHidden = useUiStateStore((state) => state.setEnvironmentHidden);
+
   return (
     <div className={ITEM_ROW_CLASSNAME}>
       <div className={ITEM_ROW_INNER_CLASSNAME}>
@@ -1381,6 +1389,13 @@ function SavedBackendListRow({
           {metadataBits.length > 0 ? (
             <p className="text-xs text-muted-foreground">{metadataBits.join(" · ")}</p>
           ) : null}
+          <label className="flex w-fit cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox
+              checked={!isHiddenFromSidebar}
+              onCheckedChange={(checked) => setEnvironmentHidden(environmentId, checked !== true)}
+            />
+            Show threads in sidebar
+          </label>
           {versionMismatch ? (
             <div className="flex flex-wrap items-center gap-2">
               <p className="flex items-center gap-1 text-warning text-xs">

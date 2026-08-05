@@ -457,6 +457,42 @@ export function firstValidTimestamp(
   return null;
 }
 
+// Single choke point for the "hide this machine's threads" preference: the
+// v2 sidebar's active/snoozed/settled partition reads its input threads
+// through this filter, so a hidden environment can never leak into any of
+// those buckets. Deliberately NOT reused by the command palette's thread
+// search — a hidden machine's thread must still be findable by explicit
+// search, only the passive sidebar list hides it.
+export function filterVisibleSidebarThreads<T extends ScopedSidebarThread>(input: {
+  threads: readonly T[];
+  scopedProjectKeys: ReadonlySet<string> | null;
+  hiddenEnvironmentIds: ReadonlySet<string>;
+}): T[] {
+  const { threads, scopedProjectKeys, hiddenEnvironmentIds } = input;
+  return threads.filter(
+    (thread) =>
+      thread.archivedAt === null &&
+      !hiddenEnvironmentIds.has(thread.environmentId) &&
+      (scopedProjectKeys === null ||
+        scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
+  );
+}
+
+// A logical project can span environments (the same repo checked out
+// locally and on a remote). Hiding an environment must not blank the
+// project's group entry while another member is still visible — only drop
+// the group once every member lives in a hidden environment, so the
+// project-scope menu never offers a group that can't show any threads.
+export function filterSidebarProjectGroupsForHiddenEnvironments<T extends LogicalSidebarProject>(
+  projectGroups: readonly T[],
+  hiddenEnvironmentIds: ReadonlySet<string>,
+): T[] {
+  if (hiddenEnvironmentIds.size === 0) return [...projectGroups];
+  return projectGroups.filter((group) =>
+    group.memberProjectRefs.some((ref) => !hiddenEnvironmentIds.has(ref.environmentId)),
+  );
+}
+
 // v2 sort: static creation order, newest thread on top. Activity NEVER
 // reorders the list — a row holds its position from open until settled, so
 // the screen only moves at lifecycle transitions. Status (including pending

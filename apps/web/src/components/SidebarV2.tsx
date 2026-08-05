@@ -23,6 +23,7 @@ import {
   CircleDashedIcon,
   ClockIcon,
   CopyIcon,
+  EyeOffIcon,
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
@@ -105,6 +106,8 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import {
+  filterSidebarProjectGroupsForHiddenEnvironments,
+  filterVisibleSidebarThreads,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
@@ -1008,6 +1011,12 @@ function latestTurnDiff(
 export default function SidebarV2() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
+  const hiddenEnvironmentIdList = useUiStateStore((store) => store.hiddenEnvironmentIds);
+  const clearHiddenEnvironments = useUiStateStore((store) => store.clearHiddenEnvironments);
+  const hiddenEnvironmentIds = useMemo(
+    () => new Set(hiddenEnvironmentIdList),
+    [hiddenEnvironmentIdList],
+  );
   const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -1122,6 +1131,14 @@ export default function SidebarV2() {
   const projectGroups = useMemo(
     () => sortLogicalProjectsForSidebar(unsortedProjectGroups, threads, sidebarProjectSortOrder),
     [sidebarProjectSortOrder, threads, unsortedProjectGroups],
+  );
+  // A logical project can span environments; only drop it from the picker
+  // once every member is hidden. `projectGroups` itself stays unfiltered —
+  // projectDisplayNameByKey below still needs to resolve names for threads
+  // whose OWN environment is visible even when a sibling member is hidden.
+  const visibleProjectGroups = useMemo(
+    () => filterSidebarProjectGroupsForHiddenEnvironments(projectGroups, hiddenEnvironmentIds),
+    [hiddenEnvironmentIds, projectGroups],
   );
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const providerEntryByInstanceId = useMemo(
@@ -1383,12 +1400,16 @@ export default function SidebarV2() {
     // memo exactly at the next wake boundary.
     void snoozeWakeTick;
     const preciseNow = new Date().toISOString();
-    const visible = threads.filter(
-      (thread) =>
-        thread.archivedAt === null &&
-        (scopedProjectKeys === null ||
-          scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
-    );
+    // Single choke point: every downstream bucket (active/snoozed/settled)
+    // reads from this filtered list, so a hidden environment can't leak in
+    // through any of them. The command palette's thread search deliberately
+    // does NOT go through this filter (see filterVisibleSidebarThreads) — a
+    // hidden machine's thread must still be reachable by explicit search.
+    const visible = filterVisibleSidebarThreads({
+      threads,
+      scopedProjectKeys,
+      hiddenEnvironmentIds,
+    });
     const active: EnvironmentThreadShell[] = [];
     const snoozed: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
@@ -1431,6 +1452,7 @@ export default function SidebarV2() {
   }, [
     autoSettleAfterDays,
     changeRequestStateByKey,
+    hiddenEnvironmentIds,
     nowMinute,
     scopedProjectKeys,
     serverConfigs,
@@ -2283,7 +2305,7 @@ export default function SidebarV2() {
                 </Tooltip>
               </div>
             </div>
-            {projectGroups.length > 0 ? (
+            {visibleProjectGroups.length > 0 ? (
               <div className="flex items-center gap-1">
                 <Menu open={projectScopeMenuOpen} onOpenChange={setProjectScopeMenuOpen}>
                   <MenuTrigger
@@ -2323,7 +2345,7 @@ export default function SidebarV2() {
                         <FolderIcon className="size-4 shrink-0" />
                         <span className="min-w-0 truncate text-sm">All projects</span>
                       </MenuRadioItem>
-                      {projectGroups.map((project) => {
+                      {visibleProjectGroups.map((project) => {
                         const scopeKey = project.projectKey;
                         return (
                           <MenuRadioItem
@@ -2572,6 +2594,18 @@ export default function SidebarV2() {
                 "No threads yet"
               )}
             </div>
+          ) : null}
+          {hiddenEnvironmentIds.size > 0 ? (
+            <button
+              type="button"
+              onClick={() => clearHiddenEnvironments()}
+              className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] text-muted-foreground/70 transition-colors hover:bg-sidebar-row-hover hover:text-foreground"
+            >
+              <EyeOffIcon aria-hidden className="size-3 shrink-0" />
+              {hiddenEnvironmentIds.size === 1
+                ? "1 environment's threads hidden — click to show"
+                : `${hiddenEnvironmentIds.size} environments' threads hidden — click to show`}
+            </button>
           ) : null}
         </SidebarGroup>
       </SidebarContent>

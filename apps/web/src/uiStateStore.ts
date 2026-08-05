@@ -27,6 +27,7 @@ export interface PersistedUiState {
   defaultAdvertisedEndpointKey?: string | null;
   threadChangedFilesExpansionVersion?: typeof THREAD_CHANGED_FILES_EXPANSION_VERSION;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
+  hiddenEnvironmentIds?: string[];
 }
 
 export interface UiProjectState {
@@ -43,7 +44,16 @@ export interface UiEndpointState {
   defaultAdvertisedEndpointKey: string | null;
 }
 
-export interface UiState extends UiProjectState, UiThreadState, UiEndpointState {}
+export interface UiEnvironmentState {
+  // Client-side display preference only: hidden environments' threads and
+  // projects still exist on the server, they're just filtered out of the
+  // sidebar's thread list (see SidebarV2's use of filterVisibleSidebarThreads).
+  // Deliberately reversible and never touches the server.
+  hiddenEnvironmentIds: readonly string[];
+}
+
+export interface UiState
+  extends UiProjectState, UiThreadState, UiEndpointState, UiEnvironmentState {}
 
 const initialState: UiState = {
   projectExpandedById: {},
@@ -51,6 +61,7 @@ const initialState: UiState = {
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
+  hiddenEnvironmentIds: [],
 };
 
 const LEGACY_PROJECT_CWD_PREFERENCE_PREFIX = "legacy-project-cwd:";
@@ -135,6 +146,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       parsed.defaultAdvertisedEndpointKey.length > 0
         ? parsed.defaultAdvertisedEndpointKey
         : null,
+    hiddenEnvironmentIds: sanitizeStringArray(parsed.hiddenEnvironmentIds),
   };
 }
 
@@ -207,6 +219,7 @@ export function persistState(state: UiState): void {
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
+        hiddenEnvironmentIds: [...state.hiddenEnvironmentIds],
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -304,6 +317,36 @@ export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | nu
   };
 }
 
+// hidden: undefined toggles; true/false forces the state (idempotent, so a
+// double-click or a "Show all" bulk action can't fight a racing toggle).
+export function setEnvironmentHidden(
+  state: UiState,
+  environmentId: string,
+  hidden?: boolean,
+): UiState {
+  const isHidden = state.hiddenEnvironmentIds.includes(environmentId);
+  const nextHidden = hidden ?? !isHidden;
+  if (nextHidden === isHidden) {
+    return state;
+  }
+  return {
+    ...state,
+    hiddenEnvironmentIds: nextHidden
+      ? [...state.hiddenEnvironmentIds, environmentId]
+      : state.hiddenEnvironmentIds.filter((id) => id !== environmentId),
+  };
+}
+
+export function clearHiddenEnvironments(state: UiState): UiState {
+  if (state.hiddenEnvironmentIds.length === 0) {
+    return state;
+  }
+  return {
+    ...state,
+    hiddenEnvironmentIds: [],
+  };
+}
+
 export function resolveProjectExpanded(
   projectExpandedById: Readonly<Record<string, boolean>>,
   preferenceKeys: readonly string[],
@@ -387,6 +430,8 @@ interface UiStateStore extends UiState {
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
+  setEnvironmentHidden: (environmentId: string, hidden?: boolean) => void;
+  clearHiddenEnvironments: () => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
     draggedProjectIds: readonly string[],
@@ -406,6 +451,9 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
+  setEnvironmentHidden: (environmentId, hidden) =>
+    set((state) => setEnvironmentHidden(state, environmentId, hidden)),
+  clearHiddenEnvironments: () => set((state) => clearHiddenEnvironments(state)),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
     set((state) =>
       reorderProjects(state, currentProjectOrder, draggedProjectIds, targetProjectIds),

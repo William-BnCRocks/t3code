@@ -87,21 +87,43 @@ const requestGrokBilling = (
   );
 
 /**
+ * Per-connection memo of which method spelling that agent answers, so a
+ * long-lived session probes the alternatives once rather than on every
+ * five-minute poll. Keyed by the runtime object itself and weak, so it dies
+ * with the session — a new session re-probes, which is what lets a client
+ * updated mid-session pick up the working spelling without a restart.
+ */
+const billingMethodByRuntime = new WeakMap<object, string>();
+
+/**
  * Read Grok account billing/credit telemetry over an active `grok agent
- * stdio` ACP connection. Empty params suffice (verified live). Tries each
- * method spelling in `GROK_BILLING_METHODS` order. Fail-open on every path:
- * returns `Option.none()` for an unsupported method, a timeout, or a
- * malformed/rejected response — never throws. The response body arrives
+ * stdio` ACP connection. Empty params suffice (verified live). Tries the
+ * spelling this connection already answered, else each of
+ * `GROK_BILLING_METHODS` in order, remembering the winner. Fail-open on
+ * every path: returns `Option.none()` for an unsupported method, a timeout,
+ * or a malformed/rejected response — never throws. The response body arrives
  * wrapped as `{ config: { creditUsagePercent, currentPeriod, ... } }`; the
  * normalizer unwraps it.
  */
 export const readGrokBillingOverAcp = Effect.fn("readGrokBillingOverAcp")(function* (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
 ): Effect.fn.Return<Option.Option<unknown>, never, never> {
-  for (const method of GROK_BILLING_METHODS) {
+  const remembered = billingMethodByRuntime.get(runtime);
+  const methods =
+    remembered === undefined
+      ? GROK_BILLING_METHODS
+      : [remembered, ...GROK_BILLING_METHODS.filter((method) => method !== remembered)];
+  for (const method of methods) {
     const response = yield* requestGrokBilling(runtime, method, {});
     if (Option.isSome(response)) {
+      billingMethodByRuntime.set(runtime, method);
       return response;
+    }
+    // The winner stopped working (agent restarted behind the same runtime,
+    // method renamed): forget it so the next poll re-probes from the top
+    // instead of pinning a now-dead spelling.
+    if (remembered === method) {
+      billingMethodByRuntime.delete(runtime);
     }
   }
   return Option.none();

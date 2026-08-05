@@ -3,6 +3,8 @@ import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
+  filterSidebarProjectGroupsForHiddenEnvironments,
+  filterVisibleSidebarThreads,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
   resolveAdjacentThreadId,
@@ -651,6 +653,125 @@ describe("resolveSidebarV2Status", () => {
 
   it("defaults to ready with no session", () => {
     expect(resolveSidebarV2Status({ ...idle, session: null })).toBe("ready");
+  });
+});
+
+describe("filterVisibleSidebarThreads", () => {
+  const thread = (input: {
+    id: string;
+    environmentId: string;
+    projectId: string;
+    archivedAt?: string | null;
+  }) => ({
+    id: input.id,
+    createdAt: "2026-03-09T08:00:00.000Z",
+    updatedAt: "2026-03-09T08:00:00.000Z",
+    environmentId: input.environmentId,
+    projectId: input.projectId,
+    archivedAt: input.archivedAt ?? null,
+  });
+
+  it("excludes threads whose environment is hidden", () => {
+    const threads = [
+      thread({ id: "local-1", environmentId: "environment-local", projectId: "proj-a" }),
+      thread({ id: "remote-1", environmentId: "environment-remote", projectId: "proj-a" }),
+    ];
+
+    const visible = filterVisibleSidebarThreads({
+      threads,
+      scopedProjectKeys: null,
+      hiddenEnvironmentIds: new Set(["environment-remote"]),
+    });
+
+    expect(visible.map((t) => t.id)).toEqual(["local-1"]);
+  });
+
+  it("leaves non-hidden environments unaffected", () => {
+    const threads = [
+      thread({ id: "local-1", environmentId: "environment-local", projectId: "proj-a" }),
+      thread({ id: "local-2", environmentId: "environment-local", projectId: "proj-a" }),
+    ];
+
+    const visible = filterVisibleSidebarThreads({
+      threads,
+      scopedProjectKeys: null,
+      hiddenEnvironmentIds: new Set(["environment-remote"]),
+    });
+
+    expect(visible.map((t) => t.id)).toEqual(["local-1", "local-2"]);
+  });
+
+  it("still applies archived and project-scope filtering alongside hidden environments", () => {
+    const threads = [
+      thread({ id: "archived", environmentId: "environment-local", projectId: "proj-a" }),
+      thread({
+        id: "archived-explicit",
+        environmentId: "environment-local",
+        projectId: "proj-a",
+        archivedAt: "2026-03-09T08:00:00.000Z",
+      }),
+      thread({ id: "out-of-scope", environmentId: "environment-local", projectId: "proj-b" }),
+      thread({ id: "in-scope", environmentId: "environment-local", projectId: "proj-a" }),
+    ];
+
+    const visible = filterVisibleSidebarThreads({
+      threads: threads.filter((t) => t.id !== "archived"),
+      scopedProjectKeys: new Set(["environment-local:proj-a"]),
+      hiddenEnvironmentIds: new Set(),
+    });
+
+    expect(visible.map((t) => t.id)).toEqual(["in-scope"]);
+  });
+});
+
+describe("filterSidebarProjectGroupsForHiddenEnvironments", () => {
+  const group = (input: { projectKey: string; memberEnvironmentIds: readonly string[] }) => ({
+    id: input.projectKey,
+    title: input.projectKey,
+    projectKey: input.projectKey,
+    memberProjectRefs: input.memberEnvironmentIds.map((environmentId) => ({
+      environmentId,
+      projectId: input.projectKey,
+    })),
+  });
+
+  it("skips a group whose members are all hidden", () => {
+    const groups = [
+      group({ projectKey: "remote-only", memberEnvironmentIds: ["environment-remote"] }),
+      group({ projectKey: "local-only", memberEnvironmentIds: ["environment-local"] }),
+    ];
+
+    const visible = filterSidebarProjectGroupsForHiddenEnvironments(
+      groups,
+      new Set(["environment-remote"]),
+    );
+
+    expect(visible.map((g) => g.projectKey)).toEqual(["local-only"]);
+  });
+
+  it("keeps a group with at least one visible member, even if spanning environments", () => {
+    const groups = [
+      group({
+        projectKey: "mixed",
+        memberEnvironmentIds: ["environment-local", "environment-remote"],
+      }),
+    ];
+
+    const visible = filterSidebarProjectGroupsForHiddenEnvironments(
+      groups,
+      new Set(["environment-remote"]),
+    );
+
+    expect(visible.map((g) => g.projectKey)).toEqual(["mixed"]);
+  });
+
+  it("returns every group unchanged when nothing is hidden", () => {
+    const groups = [
+      group({ projectKey: "a", memberEnvironmentIds: ["environment-local"] }),
+      group({ projectKey: "b", memberEnvironmentIds: ["environment-remote"] }),
+    ];
+
+    expect(filterSidebarProjectGroupsForHiddenEnvironments(groups, new Set())).toEqual(groups);
   });
 });
 

@@ -2,6 +2,7 @@ import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  clearHiddenEnvironments,
   legacyProjectCwdPreferenceKey,
   markThreadUnread,
   markThreadVisited,
@@ -12,6 +13,7 @@ import {
   reorderProjects,
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
+  setEnvironmentHidden,
   setProjectExpanded,
   setThreadChangedFilesExpanded,
   type UiState,
@@ -24,6 +26,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
+    hiddenEnvironmentIds: [],
     ...overrides,
   };
 }
@@ -144,6 +147,34 @@ describe("uiStateStore pure functions", () => {
       defaultAdvertisedEndpointKey: null,
     });
   });
+
+  it("toggles an environment's hidden state", () => {
+    const hidden = setEnvironmentHidden(makeUiState(), "environment-remote");
+
+    expect(hidden.hiddenEnvironmentIds).toEqual(["environment-remote"]);
+    // Toggling again (no explicit `hidden` arg) flips it back.
+    expect(setEnvironmentHidden(hidden, "environment-remote").hiddenEnvironmentIds).toEqual([]);
+  });
+
+  it("is idempotent when forcing an explicit hidden value", () => {
+    const state = makeUiState();
+
+    expect(setEnvironmentHidden(state, "environment-remote", false)).toBe(state);
+
+    const hidden = setEnvironmentHidden(state, "environment-remote", true);
+    expect(hidden.hiddenEnvironmentIds).toEqual(["environment-remote"]);
+    expect(setEnvironmentHidden(hidden, "environment-remote", true)).toBe(hidden);
+  });
+
+  it("clears every hidden environment at once", () => {
+    let state = setEnvironmentHidden(makeUiState(), "environment-a", true);
+    state = setEnvironmentHidden(state, "environment-b", true);
+    expect(state.hiddenEnvironmentIds).toEqual(["environment-a", "environment-b"]);
+
+    const cleared = clearHiddenEnvironments(state);
+    expect(cleared.hiddenEnvironmentIds).toEqual([]);
+    expect(clearHiddenEnvironments(cleared)).toBe(cleared);
+  });
 });
 
 describe("parsePersistedState", () => {
@@ -183,6 +214,7 @@ describe("parsePersistedState", () => {
           "turn-2": true,
         },
       },
+      hiddenEnvironmentIds: [],
     });
   });
 
@@ -211,6 +243,23 @@ describe("parsePersistedState", () => {
     expect(resolveProjectExpanded(parsed.projectExpandedById, [projectAKey])).toBe(true);
     expect(resolveProjectExpanded(parsed.projectExpandedById, [projectBKey])).toBe(false);
     expect(resolveProjectExpanded(parsed.projectExpandedById, ["unknown"])).toBe(true);
+  });
+
+  it("sanitizes hidden environment ids, dropping empties and duplicates", () => {
+    const parsed = parsePersistedState({
+      hiddenEnvironmentIds: ["environment-remote", "", "environment-remote", "environment-wsl"],
+    });
+
+    expect(parsed.hiddenEnvironmentIds).toEqual(["environment-remote", "environment-wsl"]);
+  });
+
+  it("defaults hidden environment ids to empty when absent or malformed", () => {
+    expect(parsePersistedState({}).hiddenEnvironmentIds).toEqual([]);
+    expect(
+      parsePersistedState({
+        hiddenEnvironmentIds: "not-an-array" as unknown as string[],
+      }).hiddenEnvironmentIds,
+    ).toEqual([]);
   });
 
   it("preserves legacy expanded-only semantics for one-way migration", () => {
@@ -303,6 +352,7 @@ describe("uiStateStore persistence", () => {
           "turn-2": true,
         },
       },
+      hiddenEnvironmentIds: [],
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,
@@ -320,5 +370,17 @@ describe("uiStateStore persistence", () => {
       localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
     ) as PersistedUiState;
     expect(resolveProjectExpanded(persisted.projectExpandedById ?? {}, ["unknown"])).toBe(true);
+  });
+
+  it("round-trips a hidden-environment toggle through persist and parse", () => {
+    const hidden = setEnvironmentHidden(makeUiState(), "environment-remote", true);
+
+    persistState(hidden);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(persisted.hiddenEnvironmentIds).toEqual(["environment-remote"]);
+    expect(parsePersistedState(persisted).hiddenEnvironmentIds).toEqual(["environment-remote"]);
   });
 });
