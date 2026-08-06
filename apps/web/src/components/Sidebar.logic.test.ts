@@ -3,6 +3,7 @@ import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
+  deriveSidebarMachineToggles,
   filterSidebarProjectGroupsForHiddenEnvironments,
   filterVisibleSidebarThreads,
   getSidebarThreadIdsToPrewarm,
@@ -772,6 +773,100 @@ describe("filterSidebarProjectGroupsForHiddenEnvironments", () => {
     ];
 
     expect(filterSidebarProjectGroupsForHiddenEnvironments(groups, new Set())).toEqual(groups);
+  });
+});
+
+describe("deriveSidebarMachineToggles", () => {
+  const environments = [
+    { environmentId: "environment-remote-a", label: "Remote A" },
+    { environmentId: "environment-local", label: "Local" },
+    { environmentId: "environment-remote-b", label: "Remote B" },
+  ];
+
+  it("orders the primary environment first, keeping the rest in catalog order", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments,
+      hiddenEnvironmentIds: new Set(),
+      primaryEnvironmentId: "environment-local",
+    });
+
+    expect(toggles.map((toggle) => toggle.environmentId)).toEqual([
+      "environment-local",
+      "environment-remote-a",
+      "environment-remote-b",
+    ]);
+  });
+
+  it("leaves catalog order untouched when the primary is already first", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments,
+      hiddenEnvironmentIds: new Set(),
+      primaryEnvironmentId: "environment-remote-a",
+    });
+
+    expect(toggles.map((toggle) => toggle.environmentId)).toEqual([
+      "environment-remote-a",
+      "environment-local",
+      "environment-remote-b",
+    ]);
+  });
+
+  it("leaves catalog order untouched when there is no primary", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments,
+      hiddenEnvironmentIds: new Set(),
+      primaryEnvironmentId: null,
+    });
+
+    expect(toggles.map((toggle) => toggle.environmentId)).toEqual([
+      "environment-remote-a",
+      "environment-local",
+      "environment-remote-b",
+    ]);
+  });
+
+  it("carries each environment's label through unchanged", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments,
+      hiddenEnvironmentIds: new Set(),
+      primaryEnvironmentId: null,
+    });
+
+    expect(toggles.map((toggle) => toggle.label)).toEqual(["Remote A", "Local", "Remote B"]);
+  });
+
+  it("checks every environment that is NOT hidden", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments,
+      hiddenEnvironmentIds: new Set(["environment-remote-a"]),
+      primaryEnvironmentId: "environment-local",
+    });
+
+    expect(toggles.map((toggle) => [toggle.environmentId, toggle.checked])).toEqual([
+      ["environment-local", true],
+      ["environment-remote-a", false],
+      ["environment-remote-b", true],
+    ]);
+  });
+
+  it("marks every toggle unchecked when every environment is hidden", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments,
+      hiddenEnvironmentIds: new Set(environments.map((environment) => environment.environmentId)),
+      primaryEnvironmentId: "environment-local",
+    });
+
+    expect(toggles.every((toggle) => !toggle.checked)).toBe(true);
+  });
+
+  it("still returns a single toggle for a single-environment catalog (the caller gates visibility)", () => {
+    const toggles = deriveSidebarMachineToggles({
+      environments: [{ environmentId: "environment-local", label: "Local" }],
+      hiddenEnvironmentIds: new Set(),
+      primaryEnvironmentId: "environment-local",
+    });
+
+    expect(toggles).toHaveLength(1);
   });
 });
 

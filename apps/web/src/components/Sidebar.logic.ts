@@ -493,6 +493,35 @@ export function filterSidebarProjectGroupsForHiddenEnvironments<T extends Logica
   );
 }
 
+export interface SidebarMachineToggle {
+  environmentId: string;
+  label: string;
+  checked: boolean;
+}
+
+/** Machine checklist for the sidebar's project-scope menu: one row per
+    environment, primary first (it's the environment most users act on), then
+    the rest in catalog order. `checked` mirrors "shown" (NOT hidden), matching
+    the Connections settings checkbox so both surfaces read the same state. */
+export function deriveSidebarMachineToggles(input: {
+  environments: readonly { environmentId: string; label: string }[];
+  hiddenEnvironmentIds: ReadonlySet<string>;
+  primaryEnvironmentId: string | null;
+}): SidebarMachineToggle[] {
+  const { environments, hiddenEnvironmentIds, primaryEnvironmentId } = input;
+  const toggles = environments.map((environment) => ({
+    environmentId: environment.environmentId,
+    label: environment.label,
+    checked: !hiddenEnvironmentIds.has(environment.environmentId),
+  }));
+  if (primaryEnvironmentId === null) return toggles;
+  const primaryIndex = toggles.findIndex((toggle) => toggle.environmentId === primaryEnvironmentId);
+  if (primaryIndex <= 0) return toggles;
+  const [primaryToggle] = toggles.splice(primaryIndex, 1);
+  toggles.unshift(primaryToggle!);
+  return toggles;
+}
+
 // v2 sort: static creation order, newest thread on top. Activity NEVER
 // reorders the list — a row holds its position from open until settled, so
 // the screen only moves at lifecycle transitions. Status (including pending
