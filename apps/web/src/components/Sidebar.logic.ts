@@ -499,7 +499,7 @@ export interface SidebarMachineToggle {
   checked: boolean;
 }
 
-/** Machine checklist for the sidebar's project-scope menu: one row per
+/** Machine checklist for the sidebar footer's machines menu: one row per
     environment, primary first (it's the environment most users act on), then
     the rest in catalog order. `checked` mirrors "shown" (NOT hidden), matching
     the Connections settings checkbox so both surfaces read the same state. */

@@ -81,7 +81,6 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { deriveEnvironmentDisplayLabel } from "./ProviderUpdateLaunchNotification.logic";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -107,7 +106,6 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import {
-  deriveSidebarMachineToggles,
   filterSidebarProjectGroupsForHiddenEnvironments,
   filterVisibleSidebarThreads,
   formatWorkingDurationLabel,
@@ -155,16 +153,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Kbd } from "./ui/kbd";
-import {
-  Menu,
-  MenuCheckboxItem,
-  MenuGroupLabel,
-  MenuPopup,
-  MenuRadioGroup,
-  MenuRadioItem,
-  MenuSeparator,
-  MenuTrigger,
-} from "./ui/menu";
+import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
@@ -1024,7 +1013,6 @@ export default function SidebarV2() {
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const hiddenEnvironmentIdList = useUiStateStore((store) => store.hiddenEnvironmentIds);
   const clearHiddenEnvironments = useUiStateStore((store) => store.clearHiddenEnvironments);
-  const setEnvironmentHidden = useUiStateStore((store) => store.setEnvironmentHidden);
   const hiddenEnvironmentIds = useMemo(
     () => new Set(hiddenEnvironmentIdList),
     [hiddenEnvironmentIdList],
@@ -1109,29 +1097,6 @@ export default function SidebarV2() {
         environments.map((environment) => [environment.environmentId, environment.label] as const),
       ),
     [environments],
-  );
-  // Machine checklist in the project-scope menu: same display-label
-  // resolution as the usage overview (primary gets its OS/WSL label, others
-  // keep their catalog label) so the two surfaces never disagree.
-  const machineToggles = useMemo(
-    () =>
-      deriveSidebarMachineToggles({
-        environments: environments.map((environment) => ({
-          environmentId: environment.environmentId,
-          label:
-            environment.environmentId === primaryEnvironmentId
-              ? deriveEnvironmentDisplayLabel({
-                  isWsl: false,
-                  wslDistro: null,
-                  platformOs: environment.serverConfig?.environment.platform.os,
-                  fallbackLabel: environment.label,
-                })
-              : environment.label,
-        })),
-        hiddenEnvironmentIds,
-        primaryEnvironmentId,
-      }),
-    [environments, hiddenEnvironmentIds, primaryEnvironmentId],
   );
   const orderedProjects = useMemo(
     () =>
@@ -2363,18 +2328,6 @@ export default function SidebarV2() {
                     <span className="min-w-0 flex-1 truncate">
                       {scopedProjectGroup?.displayName ?? "All projects"}
                     </span>
-                    {hiddenEnvironmentIds.size > 0 ? (
-                      <span
-                        className="shrink-0 text-[10px] text-muted-foreground"
-                        title={
-                          hiddenEnvironmentIds.size === 1
-                            ? "1 machine hidden"
-                            : `${hiddenEnvironmentIds.size} machines hidden`
-                        }
-                      >
-                        {hiddenEnvironmentIds.size} hidden
-                      </span>
-                    ) : null}
                     <ChevronDownIcon className="-mr-px size-4 shrink-0" />
                   </MenuTrigger>
                   <MenuPopup align="start" className="w-(--anchor-width)">
@@ -2423,25 +2376,6 @@ export default function SidebarV2() {
                         );
                       })}
                     </MenuRadioGroup>
-                    {machineToggles.length > 1 ? (
-                      <>
-                        <MenuSeparator />
-                        <MenuGroupLabel>Machines</MenuGroupLabel>
-                        {machineToggles.map((machine) => (
-                          <MenuCheckboxItem
-                            key={machine.environmentId}
-                            checked={machine.checked}
-                            closeOnClick={false}
-                            className="h-8 min-h-8 px-1 py-0 text-sm font-medium"
-                            onCheckedChange={(checked) =>
-                              setEnvironmentHidden(machine.environmentId, !checked)
-                            }
-                          >
-                            <span className="min-w-0 truncate text-sm">{machine.label}</span>
-                          </MenuCheckboxItem>
-                        ))}
-                      </>
-                    ) : null}
                   </MenuPopup>
                 </Menu>
                 <Tooltip>

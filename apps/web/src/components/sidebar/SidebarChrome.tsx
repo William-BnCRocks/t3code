@@ -1,9 +1,13 @@
-import { SettingsIcon } from "lucide-react";
-import { memo, useCallback } from "react";
+import { ServerIcon, SettingsIcon } from "lucide-react";
+import { memo, useCallback, useMemo } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
+import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+import { useUiStateStore } from "../../uiStateStore";
+import { deriveSidebarMachineToggles } from "../Sidebar.logic";
+import { deriveEnvironmentDisplayLabel } from "../ProviderUpdateLaunchNotification.logic";
 import {
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
@@ -11,6 +15,14 @@ import {
   useEnvironmentStageLabel,
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
+import {
+  Menu,
+  MenuCheckboxItem,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuPopup,
+  MenuTrigger,
+} from "../ui/menu";
 import {
   SidebarFooter,
   SidebarHeader,
@@ -20,6 +32,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "../ui/sidebar";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdatePill } from "./SidebarUpdatePill";
 
@@ -122,14 +135,105 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
     <SidebarFooter className="p-2">
       <SidebarProviderUpdatePill />
       <SidebarUpdatePill />
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton onClick={handleSettingsClick}>
-            <SettingsIcon />
-            <span>Settings</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
+      <div className="flex items-center gap-1">
+        <SidebarMenu className="min-w-0 flex-1">
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={handleSettingsClick}>
+              <SettingsIcon />
+              <span>Settings</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+        <SidebarChromeMachinesMenu />
+      </div>
     </SidebarFooter>
+  );
+});
+
+// Machines menu: lives beside Settings in the sidebar's bottom bar rather
+// than inside the project-scope dropdown (a prior attempt nested it there,
+// which broke — see below). Only renders once there's more than one
+// environment; a single-machine setup has nothing to toggle.
+const SidebarChromeMachinesMenu = memo(function SidebarChromeMachinesMenu() {
+  const { environments } = useEnvironments();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const hiddenEnvironmentIdList = useUiStateStore((store) => store.hiddenEnvironmentIds);
+  const setEnvironmentHidden = useUiStateStore((store) => store.setEnvironmentHidden);
+  const hiddenEnvironmentIds = useMemo(
+    () => new Set(hiddenEnvironmentIdList),
+    [hiddenEnvironmentIdList],
+  );
+  // Same display-label resolution as the usage overview (primary gets its
+  // OS/WSL label, others keep their catalog label) so the two surfaces never
+  // disagree.
+  const machineToggles = useMemo(
+    () =>
+      deriveSidebarMachineToggles({
+        environments: environments.map((environment) => ({
+          environmentId: environment.environmentId,
+          label:
+            environment.environmentId === primaryEnvironmentId
+              ? deriveEnvironmentDisplayLabel({
+                  isWsl: false,
+                  wslDistro: null,
+                  platformOs: environment.serverConfig?.environment.platform.os,
+                  fallbackLabel: environment.label,
+                })
+              : environment.label,
+        })),
+        hiddenEnvironmentIds,
+        primaryEnvironmentId,
+      }),
+    [environments, hiddenEnvironmentIds, primaryEnvironmentId],
+  );
+
+  if (machineToggles.length <= 1) {
+    return null;
+  }
+
+  const hiddenCount = machineToggles.filter((machine) => !machine.checked).length;
+
+  return (
+    <Menu>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <MenuTrigger
+              render={
+                <SidebarMenuButton
+                  size="icon"
+                  className="relative shrink-0"
+                  aria-label="Machines"
+                />
+              }
+            />
+          }
+        >
+          <ServerIcon />
+          {hiddenCount > 0 ? (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary ring-2 ring-sidebar"
+            />
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="top">Machines</TooltipPopup>
+      </Tooltip>
+      <MenuPopup align="end" side="top" className="min-w-48">
+        <MenuGroup>
+          <MenuGroupLabel>Machines</MenuGroupLabel>
+          {machineToggles.map((machine) => (
+            <MenuCheckboxItem
+              key={machine.environmentId}
+              checked={machine.checked}
+              closeOnClick={false}
+              onCheckedChange={(checked) => setEnvironmentHidden(machine.environmentId, !checked)}
+            >
+              <span className="min-w-0 truncate text-sm">{machine.label}</span>
+            </MenuCheckboxItem>
+          ))}
+        </MenuGroup>
+      </MenuPopup>
+    </Menu>
   );
 });
