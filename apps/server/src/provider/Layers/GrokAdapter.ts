@@ -37,7 +37,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import { readGrokBillingOverAcp } from "../grokUsage.ts";
+import { readGrokBillingOverAcp, readGrokSubscriptionOverAcp } from "../grokUsage.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -961,7 +961,19 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           // is a cheap JSON-RPC round trip, and results are idempotent)
           // rather than adding cross-session coordination for it.
           yield* Effect.gen(function* () {
-            const bodyOption = yield* readGrokBillingOverAcp(ctx.acp);
+            const billingBodyOption = yield* readGrokBillingOverAcp(ctx.acp);
+            // Some accounts (verified live: a team-member account with no
+            // personal team of its own) can never answer `x.ai/billing` at
+            // all — it fails with "No personal team" every single poll, not
+            // just transiently. Rather than leave the overlay looking like
+            // it's still waiting on a turn that already ran,
+            // `x.ai/auth/check_subscription` is a same-cadence fallback:
+            // no quota number, but at least the plan/team is knowable. See
+            // `readGrokSubscriptionOverAcp`'s doc comment and the
+            // Grok-subscription branch in `providerRateLimits.ts`.
+            const bodyOption = Option.isSome(billingBodyOption)
+              ? billingBodyOption
+              : yield* readGrokSubscriptionOverAcp(ctx.acp);
             if (Option.isNone(bodyOption)) {
               return;
             }

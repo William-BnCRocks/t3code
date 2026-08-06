@@ -208,6 +208,17 @@ function InstanceBlock({ instance, isActive }: { instance: UsageInstanceView; is
         <p className="text-[11px] leading-4 text-warning/80">Not authenticated</p>
       ) : instance.state === "absent" ? (
         <AbsentHint instance={instance} />
+      ) : instance.state === "planOnly" ? (
+        <>
+          {instance.extras.length > 0 ? (
+            <div className="text-[10px] text-muted-foreground/50">
+              {instance.extras.join(" · ")}
+            </div>
+          ) : null}
+          <p className="text-[11px] leading-4 text-muted-foreground/55">
+            {"Usage isn't available for this account."}
+          </p>
+        </>
       ) : (
         <>
           <div className={cn("space-y-1", instance.isStale && "opacity-60")}>

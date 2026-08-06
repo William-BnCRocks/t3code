@@ -518,6 +518,95 @@ describe("deriveUsageOverview — instance filtering and extras", () => {
   });
 });
 
+describe("deriveUsageOverview — Grok-subscription-fallback (planOnly) instances", () => {
+  it("marks an instance with empty windows and a non-empty planLabel as planOnly", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "grok",
+              driver: "grok",
+              rateLimits: { observedAt: NOW_ISO, windows: [], planLabel: "SuperGrok · BnC" },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    const instance = overview.environments[0]?.instances[0];
+    expect(instance?.state).toBe("planOnly");
+    expect(instance?.windows).toEqual([]);
+    expect(instance?.worst).toBeNull();
+    expect(instance?.extras).toEqual(["SuperGrok · BnC"]);
+  });
+
+  it("keeps state ok when windows is empty but there is no planLabel", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "grok",
+              driver: "grok",
+              rateLimits: { observedAt: NOW_ISO, windows: [] },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(overview.environments[0]?.instances[0]?.state).toBe("ok");
+  });
+
+  it("keeps state ok when windows is non-empty even alongside a planLabel", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "grok",
+              driver: "grok",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "monthly", usedPercent: 37.5 }],
+                planLabel: "SuperGrok · BnC",
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(overview.environments[0]?.instances[0]?.state).toBe("ok");
+  });
+
+  it("never lets a planOnly instance drive worst/the ring", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "grok",
+              driver: "grok",
+              rateLimits: { observedAt: NOW_ISO, windows: [], planLabel: "SuperGrok · BnC" },
+            }),
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 10, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(overview.worst?.instance.instanceId).toBe(ProviderInstanceId.make("claudeAgent"));
+  });
+});
+
 describe("deriveUsageOverview — usageLogDir", () => {
   it("propagates the primary environment's usageLogDir onto the overview", () => {
     const overview = deriveUsageOverview(

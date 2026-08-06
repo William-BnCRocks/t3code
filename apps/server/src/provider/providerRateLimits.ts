@@ -48,6 +48,23 @@
  *     `"weekly"` window over `previous`, leaving the monthly credits window
  *     and any labels untouched. See `normalizeGrokRetryStateSignal` for the
  *     field mapping.
+ *  6. Grok subscription fallback — the raw ACP `x.ai/auth/check_subscription`
+ *     response body, read per-session by `GrokAdapter` only when that poll's
+ *     shape-3 billing read came back empty (verified live: some accounts,
+ *     e.g. a team-member account with no personal team of its own, can never
+ *     answer `x.ai/billing` at all — see `grokUsage.readGrokSubscriptionOverAcp`).
+ *     Structurally detected by a top-level `authenticated` field alongside a
+ *     `meta` object carrying `subscription_tier`. Carries no quota number at
+ *     all, so it normalizes to an EMPTY `windows` array plus a `planLabel` of
+ *     `subscription_tier` verbatim (team-appended when `meta.team_name` is
+ *     also non-empty, e.g. `"SuperGrok · BnC"`) — never email or team_id.
+ *     This means "billing is unreadable, here's what we know", so like shape
+ *     3 it's an authoritative replace of the labels, EXCEPT it must never
+ *     downgrade a `previous` snapshot that already has real windows (a
+ *     working shape-3 billing read, or a shape-5 weekly signal riding on top
+ *     of one): when `previous.windows` is non-empty, those windows are kept
+ *     as-is and only the labels are refreshed. See
+ *     `normalizeGrokSubscriptionPayload` for the field mapping.
  *
  * This module never throws: malformed or unrecognized payloads fall back to
  * the previous snapshot (or `undefined` when there is none) so a single bad
@@ -505,6 +522,29 @@ const normalizeGrokRetryStateSignal = (raw: unknown): WindowFields | undefined =
 };
 
 /**
+ * `payload.meta` -> an empty-windows snapshot plus a plan label, or
+ * `undefined` when `subscription_tier` is missing/empty (garbled response —
+ * callers should keep `previous` unchanged rather than replacing it with a
+ * blank snapshot). `subscription_tier` is used verbatim, NOT capitalized
+ * like the shape-3 billing branch's `subscription_tier` — this field arrives
+ * already display-cased from `check_subscription` (e.g. `"SuperGrok"`,
+ * observed live), unlike billing's lowercase enum (`"supergrok"`). The team
+ * name is appended when non-empty (`"SuperGrok · BnC"`); `team_id` and
+ * `email` are never read here — they have no display value and one is PII.
+ */
+const normalizeGrokSubscriptionPayload = (
+  meta: Record<string, unknown>,
+): { windows: ServerProviderRateLimitWindow[]; planLabel?: string } | undefined => {
+  if (!isNonEmptyString(meta.subscription_tier)) {
+    return undefined;
+  }
+  const planLabel = isNonEmptyString(meta.team_name)
+    ? `${meta.subscription_tier} · ${meta.team_name}`
+    : meta.subscription_tier;
+  return { windows: [], planLabel };
+};
+
+/**
  * Fold one raw `event.payload.rateLimits` value onto the previous
  * `ServerProviderRateLimits` snapshot for a provider instance. Detects the
  * raw shape structurally (never solely by `provider` name) and never
@@ -615,6 +655,40 @@ export const mergeProviderRateLimits = (
       windows,
       ...(previous?.planLabel !== undefined ? { planLabel: previous.planLabel } : {}),
       ...(previous?.creditsLabel !== undefined ? { creditsLabel: previous.creditsLabel } : {}),
+    };
+  }
+
+  // Shape 6: Grok subscription fallback — the raw ACP
+  // `x.ai/auth/check_subscription` response body, read by `GrokAdapter`
+  // only when that poll's shape-3 billing read came back empty (see the
+  // module doc comment and `normalizeGrokSubscriptionPayload`'s doc comment
+  // for the field mapping). Detected structurally by a top-level
+  // `authenticated` field alongside a `meta` object carrying
+  // `subscription_tier` (never solely by `provider`). A `meta` that fails to
+  // yield a usable plan label falls back to `previous` unchanged. This
+  // shape carries no quota data at all, so — unlike shape 3 — it must never
+  // downgrade a `previous` snapshot that already has real windows (a
+  // working billing read, or a weekly-limit signal riding on top of one):
+  // when `previous.windows` is non-empty, those windows are kept as-is and
+  // only the labels refresh.
+  const grokSubscriptionMeta = isRecord(payload.meta) ? payload.meta : undefined;
+  const isGrokSubscriptionShape =
+    "authenticated" in payload &&
+    grokSubscriptionMeta !== undefined &&
+    "subscription_tier" in grokSubscriptionMeta;
+  if (isGrokSubscriptionShape && grokSubscriptionMeta !== undefined) {
+    const normalized = normalizeGrokSubscriptionPayload(grokSubscriptionMeta);
+    if (normalized === undefined) {
+      return previous;
+    }
+    const windows =
+      previous?.windows !== undefined && previous.windows.length > 0
+        ? previous.windows
+        : normalized.windows;
+    return {
+      observedAt,
+      windows,
+      ...(normalized.planLabel !== undefined ? { planLabel: normalized.planLabel } : {}),
     };
   }
 

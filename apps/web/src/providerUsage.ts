@@ -82,7 +82,16 @@ export interface UsageInstanceView {
   readonly driverKind: ProviderDriverKind;
   readonly displayName: string;
   readonly accentColor?: string | undefined;
-  readonly state: "ok" | "absent" | "unauthenticated";
+  /**
+   * "planOnly" is a `rateLimits` snapshot that carries an empty `windows`
+   * array but a non-empty plan label — the Grok-subscription-fallback shape
+   * (billing is unreadable for this account, but the plan/team is known).
+   * It's distinct from "absent" (no `rateLimits` at all: nothing has been
+   * read yet) so the panel can render a different, accurate explanation
+   * instead of the generic "run a turn" hint. `windows` is always empty for
+   * this state, so it never contributes to `worst`/the ring.
+   */
+  readonly state: "ok" | "absent" | "unauthenticated" | "planOnly";
   readonly observedAt: string | null;
   readonly isStale: boolean;
   readonly windows: readonly UsageWindowView[];
@@ -444,9 +453,16 @@ function deriveInstanceView(entry: ProviderInstanceEntry, nowMs: number): UsageI
   if (rateLimits.planLabel) extras.push(rateLimits.planLabel);
   if (rateLimits.creditsLabel) extras.push(`Credits: ${rateLimits.creditsLabel}`);
 
+  // The Grok-subscription-fallback shape (see providerRateLimits.ts's Shape
+  // 6): billing was unreadable so the wire snapshot's `windows` array is
+  // genuinely empty, but a plan label came through. Checked on the raw wire
+  // array (not the post-expiry-filter `windows` above) so an "ok" instance
+  // whose windows all happened to expire doesn't get relabeled here.
+  const isPlanOnly = rateLimits.windows.length === 0 && Boolean(rateLimits.planLabel);
+
   return {
     ...base,
-    state: "ok",
+    state: isPlanOnly ? "planOnly" : "ok",
     observedAt: rateLimits.observedAt,
     isStale,
     windows,

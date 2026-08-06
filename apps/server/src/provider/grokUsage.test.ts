@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import { readGrokBillingOverAcp } from "./grokUsage.ts";
+import { readGrokBillingOverAcp, readGrokSubscriptionOverAcp } from "./grokUsage.ts";
 
 function fakeRuntime(
   request: (method: string, payload: unknown) => Effect.Effect<unknown, EffectAcpErrors.AcpError>,
@@ -110,5 +110,101 @@ describe("readGrokBillingOverAcp", () => {
 
       expect(Option.isNone(result)).toBe(true);
     }),
+  );
+});
+
+describe("readGrokSubscriptionOverAcp", () => {
+  it.effect("returns Some(body) when the ext request succeeds on the first attempt", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const runtime = fakeRuntime((method, payload) => {
+        calls.push({ method, payload });
+        return Effect.succeed({
+          authenticated: true,
+          meta: { subscription_tier: "SuperGrok", team_name: "BnC" },
+        });
+      });
+
+      const result = yield* readGrokSubscriptionOverAcp(runtime);
+
+      expect(result).toEqual(
+        Option.some({
+          authenticated: true,
+          meta: { subscription_tier: "SuperGrok", team_name: "BnC" },
+        }),
+      );
+      // Underscore-prefixed method first, mirroring the billing read's
+      // verified-live spelling preference.
+      expect(calls).toEqual([{ method: "_x.ai/auth/check_subscription", payload: {} }]);
+    }),
+  );
+
+  it.effect("falls back to the plain method spelling when the underscore form is unsupported", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const runtime = fakeRuntime((method, payload) => {
+        calls.push({ method, payload });
+        if (calls.length === 1) {
+          return Effect.fail(
+            new EffectAcpErrors.AcpRequestError({
+              code: -32601,
+              errorMessage: "Method not found",
+            }),
+          );
+        }
+        return Effect.succeed({ authenticated: true, meta: { subscription_tier: "SuperGrok" } });
+      });
+
+      const result = yield* readGrokSubscriptionOverAcp(runtime);
+
+      expect(result).toEqual(
+        Option.some({ authenticated: true, meta: { subscription_tier: "SuperGrok" } }),
+      );
+      expect(calls).toEqual([
+        { method: "_x.ai/auth/check_subscription", payload: {} },
+        { method: "x.ai/auth/check_subscription", payload: {} },
+      ]);
+    }),
+  );
+
+  it.effect("remembers the working method for a connection and reuses it on later reads", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const runtime = fakeRuntime((method) => {
+        calls.push(method);
+        return method === "_x.ai/auth/check_subscription"
+          ? Effect.succeed({ authenticated: true, meta: { subscription_tier: "SuperGrok" } })
+          : Effect.fail(
+              new EffectAcpErrors.AcpRequestError({
+                code: -32601,
+                errorMessage: "Method not found",
+              }),
+            );
+      });
+
+      yield* readGrokSubscriptionOverAcp(runtime);
+      yield* readGrokSubscriptionOverAcp(runtime);
+
+      expect(calls).toEqual(["_x.ai/auth/check_subscription", "_x.ai/auth/check_subscription"]);
+    }),
+  );
+
+  it.effect(
+    "returns None (never throws) when both attempts fail, e.g. no personal team on this account",
+    () =>
+      Effect.gen(function* () {
+        const runtime = fakeRuntime(() =>
+          Effect.fail(
+            new EffectAcpErrors.AcpRequestError({
+              code: -32603,
+              errorMessage: "Internal error",
+            }),
+          ),
+        );
+
+        const result = yield* readGrokSubscriptionOverAcp(runtime);
+
+        expect(Option.isNone(result)).toBe(true);
+      }),
   );
 });

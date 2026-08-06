@@ -803,3 +803,129 @@ describe("mergeProviderRateLimits — Grok weekly-limit session signal (Shape 5)
     expect(merged).toBe(previous);
   });
 });
+
+describe("mergeProviderRateLimits — Grok subscription fallback payload (Shape 6)", () => {
+  const subscriptionPayload = (overrides?: Record<string, unknown>) => ({
+    authenticated: true,
+    meta: {
+      auth_mode: "Oidc",
+      team_id: "team-123",
+      team_name: "BnC",
+      team_role: "MEMBER",
+      subscription_tier: "SuperGrok",
+      email: "user@example.com",
+      is_zdr: false,
+      ...overrides,
+    },
+  });
+
+  it("replaces an empty previous snapshot with empty windows and a team-qualified plan label", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: subscriptionPayload(),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toEqual({
+      observedAt: OBSERVED_AT,
+      windows: [],
+      planLabel: "SuperGrok · BnC",
+    });
+  });
+
+  it("uses subscription_tier verbatim (no capitalization) and omits the team suffix when team_name is empty", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: subscriptionPayload({ team_name: "" }),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.planLabel).toBe("SuperGrok");
+  });
+
+  it("never includes email or team_id in the plan label", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: subscriptionPayload(),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.planLabel).not.toContain("user@example.com");
+    expect(merged?.planLabel).not.toContain("team-123");
+  });
+
+  it("keeps a previous working billing snapshot's windows and only refreshes the labels", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "monthly", usedPercent: 37.5, resetsAt: "2026-05-01T00:00:00.000Z" }],
+      planLabel: "Supergrok",
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: subscriptionPayload(),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toEqual({
+      observedAt: OBSERVED_AT,
+      windows: [{ kind: "monthly", usedPercent: 37.5, resetsAt: "2026-05-01T00:00:00.000Z" }],
+      planLabel: "SuperGrok · BnC",
+    });
+  });
+
+  it("keeps a previous weekly-limit signal window intact alongside a monthly window", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [
+        { kind: "monthly", usedPercent: 37.5 },
+        { kind: "weekly", status: "rejected" },
+      ],
+      planLabel: "Supergrok",
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: subscriptionPayload(),
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged?.windows).toEqual([
+      { kind: "monthly", usedPercent: 37.5 },
+      { kind: "weekly", status: "rejected" },
+    ]);
+    expect(merged?.planLabel).toBe("SuperGrok · BnC");
+  });
+
+  it("returns previous unchanged for a garbled subscription payload (subscription_tier missing)", () => {
+    const previous: ServerProviderRateLimits = {
+      observedAt: "2026-04-10T00:00:00.000Z",
+      windows: [{ kind: "monthly", usedPercent: 10 }],
+    };
+
+    const merged = mergeProviderRateLimits({
+      previous,
+      provider: "grok",
+      payload: { authenticated: true, meta: { team_name: "BnC" } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toBe(previous);
+  });
+
+  it("is not detected when meta lacks subscription_tier even with authenticated present", () => {
+    const merged = mergeProviderRateLimits({
+      previous: undefined,
+      provider: "grok",
+      payload: { authenticated: true, meta: { team_name: "BnC" } },
+      observedAt: OBSERVED_AT,
+    });
+
+    expect(merged).toBeUndefined();
+  });
+});
