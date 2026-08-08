@@ -26,5 +26,12 @@ interface ImportMeta {
 declare global {
   interface Window {
     desktopBridge?: DesktopBridge;
+    /**
+     * Desktop-only OIDC bridge: opens `authorizeUrl` in the system browser and
+     * resolves with the authorization code once the loopback listener in the
+     * Electron main process receives the callback (or rejects with a
+     * human-readable message on timeout, state mismatch, or cancellation).
+     */
+    desktopOidcLogin?: (authorizeUrl: string, state: string) => Promise<{ code: string }>;
   }
 }

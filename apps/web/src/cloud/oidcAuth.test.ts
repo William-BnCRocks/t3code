@@ -6,6 +6,7 @@ import {
   discoverOidcMetadata,
   generateOidcCodeVerifier,
   getOidcAccessToken,
+  hasDesktopOidcLoginBridge,
   oidcSignIn,
   oidcSignOut,
   readOidcAuthSnapshot,
@@ -176,6 +177,77 @@ describe("callback exchange", () => {
         new URL(`${ORIGIN}/oidc/callback?error=access_denied&error_description=User+cancelled`),
       ),
     ).rejects.toThrow("User cancelled");
+  });
+});
+
+describe("desktop loopback bridge", () => {
+  const LOOPBACK_REDIRECT_URI = "http://127.0.0.1:34339/callback";
+
+  it("reports unavailable until a bridge function is installed on window", () => {
+    expect(hasDesktopOidcLoginBridge()).toBe(false);
+    window.desktopOidcLogin = async () => ({ code: "unused" });
+    expect(hasDesktopOidcLoginBridge()).toBe(true);
+  });
+
+  it("exchanges the bridge's code against the loopback redirect URI instead of redirecting", async () => {
+    vi.stubEnv("VITE_OIDC_ISSUER_URL", "https://auth-desktop.example.test");
+    vi.stubEnv("VITE_OIDC_WEB_CLIENT_ID", "web-client");
+    const issuer = "https://auth-desktop.example.test";
+
+    let capturedRedirectUri: string | null = null;
+    stubFetch(issuer, (params) => {
+      expect(params.get("grant_type")).toBe("authorization_code");
+      expect(params.get("client_id")).toBe("web-client");
+      expect(params.get("code")).toBe("bridge-code");
+      capturedRedirectUri = params.get("redirect_uri");
+      return new Response(
+        JSON.stringify({
+          access_token: "access-1",
+          refresh_token: "refresh-1",
+          expires_in: 3600,
+          id_token: fakeIdToken({ sub: "user-1", email: "user@example.test" }),
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    let bridgeCallCount = 0;
+    let capturedAuthorizeUrl = "";
+    window.desktopOidcLogin = async (authorizeUrl, state) => {
+      bridgeCallCount += 1;
+      capturedAuthorizeUrl = authorizeUrl;
+      expect(new URL(authorizeUrl).searchParams.get("state")).toBe(state);
+      return { code: "bridge-code" };
+    };
+
+    await oidcSignIn();
+
+    expect(bridgeCallCount).toBe(1);
+    expect(locationAssign).not.toHaveBeenCalled();
+    const authorizeUrl = new URL(capturedAuthorizeUrl);
+    expect(authorizeUrl.searchParams.get("redirect_uri")).toBe(LOOPBACK_REDIRECT_URI);
+    expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(capturedRedirectUri).toBe(LOOPBACK_REDIRECT_URI);
+
+    const snapshot = readOidcAuthSnapshot();
+    expect(snapshot).toEqual({
+      isSignedIn: true,
+      userId: "user-1",
+      displayIdentity: "user@example.test",
+    });
+  });
+
+  it("surfaces a bridge rejection by throwing, without touching stored session state", async () => {
+    vi.stubEnv("VITE_OIDC_ISSUER_URL", "https://auth-desktop-fail.example.test");
+    vi.stubEnv("VITE_OIDC_WEB_CLIENT_ID", "web-client");
+    const issuer = "https://auth-desktop-fail.example.test";
+    stubFetch(issuer, () => new Response(null, { status: 500 }));
+    window.desktopOidcLogin = async () => {
+      throw new Error("Signing in timed out. Try again.");
+    };
+
+    await expect(oidcSignIn()).rejects.toThrow(/timed out/);
+    expect(readOidcAuthSnapshot().isSignedIn).toBe(false);
   });
 });
 

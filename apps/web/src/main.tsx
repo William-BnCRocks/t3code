@@ -13,6 +13,7 @@ import "./index.css";
 
 import { isElectron } from "./env";
 import { ManagedRelayAuthProvider, OidcManagedRelayAuthProvider } from "./cloud/managedAuth";
+import { hasDesktopOidcLoginBridge } from "./cloud/oidcAuth";
 import { cloudAuthMode } from "./cloud/publicConfig";
 import { getRouter } from "./router";
 import {
@@ -36,12 +37,11 @@ const authMode = cloudAuthMode();
 
 const app = <AppRoot router={router} />;
 
-// Electron does not get an OIDC provider yet: the authorization-code redirect
-// leaves the app's window entirely, and generic providers cannot be assumed
-// to complete that round trip back into the desktop shell the way Clerk's
-// dedicated Electron transport does. Cloud sign-in stays unavailable there
-// (the same "no provider mounted" state as no cloud config at all) until a
-// deep-link-based flow exists.
+// On Electron, generic OIDC sign-in goes through a system-browser + loopback
+// listener (apps/desktop's DesktopOidcLogin.ts) instead of the in-app
+// redirect the web bundle uses, since a redirect would leave the app's
+// window entirely with no way back. The provider only mounts once the
+// preload bridge that drives that flow is actually present.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     {authMode === "clerk" && clerkPublishableKey ? (
@@ -54,7 +54,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
         </ClerkProvider>
       )
-    ) : authMode === "oidc" && !isElectron ? (
+    ) : authMode === "oidc" && (!isElectron || hasDesktopOidcLoginBridge()) ? (
       <OidcManagedRelayAuthProvider>{app}</OidcManagedRelayAuthProvider>
     ) : (
       app

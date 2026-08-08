@@ -1,0 +1,255 @@
+// @effect-diagnostics nodeBuiltinImport:off - The desktop OIDC loopback callback is a Node HTTP boundary.
+import * as NodeHttp from "node:http";
+
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+
+import * as ElectronShell from "../electron/ElectronShell.ts";
+
+export const OIDC_LOOPBACK_HOST = "127.0.0.1";
+export const OIDC_LOOPBACK_PORT = 34339;
+export const OIDC_LOOPBACK_CALLBACK_PATH = "/callback";
+
+export function oidcLoopbackRedirectUri(): string {
+  return `http://${OIDC_LOOPBACK_HOST}:${OIDC_LOOPBACK_PORT}${OIDC_LOOPBACK_CALLBACK_PATH}`;
+}
+
+const DEFAULT_OIDC_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+
+export class DesktopOidcLoginAlreadyInProgressError extends Schema.TaggedErrorClass<DesktopOidcLoginAlreadyInProgressError>()(
+  "DesktopOidcLoginAlreadyInProgressError",
+  {},
+) {
+  override get message(): string {
+    return "A sign-in is already in progress in the browser.";
+  }
+}
+
+export class DesktopOidcLoginPortUnavailableError extends Schema.TaggedErrorClass<DesktopOidcLoginPortUnavailableError>()(
+  "DesktopOidcLoginPortUnavailableError",
+  {
+    port: Schema.Int,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Could not start the local sign-in listener on port ${this.port}. Close whatever else is using it and try again.`;
+  }
+}
+
+export class DesktopOidcLoginBrowserOpenError extends Schema.TaggedErrorClass<DesktopOidcLoginBrowserOpenError>()(
+  "DesktopOidcLoginBrowserOpenError",
+  {},
+) {
+  override get message(): string {
+    return "Could not open the system browser to sign in.";
+  }
+}
+
+export class DesktopOidcLoginTimedOutError extends Schema.TaggedErrorClass<DesktopOidcLoginTimedOutError>()(
+  "DesktopOidcLoginTimedOutError",
+  {},
+) {
+  override get message(): string {
+    return "Signing in timed out. Try again.";
+  }
+}
+
+export class DesktopOidcLoginStateMismatchError extends Schema.TaggedErrorClass<DesktopOidcLoginStateMismatchError>()(
+  "DesktopOidcLoginStateMismatchError",
+  {},
+) {
+  override get message(): string {
+    return "The sign-in response did not match the request that started it.";
+  }
+}
+
+export class DesktopOidcLoginDeniedError extends Schema.TaggedErrorClass<DesktopOidcLoginDeniedError>()(
+  "DesktopOidcLoginDeniedError",
+  {
+    reason: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Sign-in was cancelled (${this.reason}).`;
+  }
+}
+
+export type DesktopOidcLoginError =
+  | DesktopOidcLoginAlreadyInProgressError
+  | DesktopOidcLoginPortUnavailableError
+  | DesktopOidcLoginBrowserOpenError
+  | DesktopOidcLoginTimedOutError
+  | DesktopOidcLoginStateMismatchError
+  | DesktopOidcLoginDeniedError;
+
+export interface DesktopOidcLoginInput {
+  readonly authorizeUrl: string;
+  readonly state: string;
+}
+
+export interface DesktopOidcLoginResult {
+  readonly code: string;
+}
+
+export class DesktopOidcLogin extends Context.Service<
+  DesktopOidcLogin,
+  {
+    readonly login: (
+      input: DesktopOidcLoginInput,
+    ) => Effect.Effect<DesktopOidcLoginResult, DesktopOidcLoginError>;
+  }
+>()("@t3tools/desktop/app/DesktopOidcLogin") {}
+
+function renderCallbackPage(heading: string, detail: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark">
+<title>${heading}</title>
+<style>
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: #161616; color: #f1f3f7; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { text-align: center; padding: 2rem; }
+h1 { font-size: 1.125rem; font-weight: 600; margin: 0; }
+p { font-size: 0.9375rem; color: #9a9a9a; margin: 0.5rem 0 0; }
+</style>
+</head>
+<body><main><h1>${heading}</h1><p>${detail}</p></main></body>
+</html>`;
+}
+
+const SUCCESS_PAGE = renderCallbackPage("You're signed in", "Return to T3 Code.");
+const FAILURE_PAGE = renderCallbackPage(
+  "Sign-in didn't complete",
+  "Return to T3 Code and try again.",
+);
+
+export type DesktopOidcCallbackOutcome =
+  | { readonly _tag: "malformed" }
+  | { readonly _tag: "denied"; readonly error: DesktopOidcLoginDeniedError }
+  | { readonly _tag: "state-mismatch"; readonly error: DesktopOidcLoginStateMismatchError }
+  | { readonly _tag: "success"; readonly result: DesktopOidcLoginResult };
+
+/**
+ * Pure decision logic for a `/callback` request: what the loopback listener
+ * should complete the pending sign-in with, given the query params the
+ * provider redirected back with and the state this login started with. Kept
+ * free of the HTTP router/response plumbing so it can be unit-tested
+ * directly.
+ */
+export function resolveOidcCallback(url: URL, expectedState: string): DesktopOidcCallbackOutcome {
+  const errorParam = url.searchParams.get("error");
+  if (errorParam !== null) {
+    const reason = url.searchParams.get("error_description") ?? errorParam;
+    return { _tag: "denied", error: new DesktopOidcLoginDeniedError({ reason }) };
+  }
+
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  if (code === null || state === null) {
+    return { _tag: "malformed" };
+  }
+
+  if (state !== expectedState) {
+    return { _tag: "state-mismatch", error: new DesktopOidcLoginStateMismatchError() };
+  }
+
+  return { _tag: "success", result: { code } };
+}
+
+export interface DesktopOidcLoginOptions {
+  readonly loginTimeoutMs?: number;
+}
+
+export const make = Effect.fn("desktop.oidcLogin.make")(function* (
+  options: DesktopOidcLoginOptions = {},
+) {
+  const shell = yield* ElectronShell.ElectronShell;
+  const loginTimeoutMs = options.loginTimeoutMs ?? DEFAULT_OIDC_LOGIN_TIMEOUT_MS;
+  const lockedRef = yield* Ref.make(false);
+
+  const acquireLock = Ref.modify(lockedRef, (locked) =>
+    locked ? ([false, locked] as const) : ([true, true] as const),
+  );
+  const releaseLock = Ref.set(lockedRef, false);
+
+  const runLogin = Effect.fn("desktop.oidcLogin.run")(function* (input: DesktopOidcLoginInput) {
+    const deferred = yield* Deferred.make<DesktopOidcLoginResult, DesktopOidcLoginError>();
+
+    const callbackRoute = HttpRouter.add(
+      "GET",
+      OIDC_LOOPBACK_CALLBACK_PATH,
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const url = new URL(request.originalUrl, oidcLoopbackRedirectUri());
+        const outcome = resolveOidcCallback(url, input.state);
+
+        switch (outcome._tag) {
+          case "malformed":
+            return HttpServerResponse.html(FAILURE_PAGE).pipe(HttpServerResponse.setStatus(400));
+          case "denied":
+          case "state-mismatch":
+            yield* Deferred.complete(deferred, Effect.fail(outcome.error));
+            return HttpServerResponse.html(FAILURE_PAGE);
+          case "success":
+            yield* Deferred.complete(deferred, Effect.succeed(outcome.result));
+            return HttpServerResponse.html(SUCCESS_PAGE);
+        }
+      }),
+    );
+
+    yield* HttpRouter.serve(callbackRoute, {
+      disableListenLog: true,
+      disableLogger: true,
+    }).pipe(
+      Layer.provide(
+        NodeHttpServer.layer(NodeHttp.createServer, {
+          host: OIDC_LOOPBACK_HOST,
+          port: OIDC_LOOPBACK_PORT,
+          disablePreemptiveShutdown: true,
+        }),
+      ),
+      Layer.build,
+      Effect.mapError(
+        (cause) => new DesktopOidcLoginPortUnavailableError({ port: OIDC_LOOPBACK_PORT, cause }),
+      ),
+    );
+
+    const opened = yield* shell.openExternal(input.authorizeUrl);
+    if (!opened) {
+      return yield* new DesktopOidcLoginBrowserOpenError();
+    }
+
+    return yield* Deferred.await(deferred).pipe(
+      Effect.timeout(Duration.millis(loginTimeoutMs)),
+      Effect.catchTag("TimeoutError", () => Effect.fail(new DesktopOidcLoginTimedOutError())),
+    );
+  });
+
+  const login: DesktopOidcLogin["Service"]["login"] = Effect.fn("desktop.oidcLogin.login")(
+    function* (input) {
+      const acquired = yield* acquireLock;
+      if (!acquired) {
+        return yield* new DesktopOidcLoginAlreadyInProgressError();
+      }
+
+      return yield* runLogin(input).pipe(Effect.scoped, Effect.ensuring(releaseLock));
+    },
+  );
+
+  return DesktopOidcLogin.of({ login });
+});
+
+export const layer = (options: DesktopOidcLoginOptions = {}) =>
+  Layer.effect(DesktopOidcLogin, make(options));

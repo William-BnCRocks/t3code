@@ -165,6 +165,18 @@ export function oidcCallbackUrl(): string {
   return new URL("/oidc/callback", window.location.origin).toString();
 }
 
+/**
+ * Fixed loopback contract with the Electron main process's OIDC listener
+ * (see apps/desktop's DesktopOidcLogin.ts) -- the OIDC client allowlists this
+ * exact redirect URI. There's no shared package between web and desktop for
+ * this, so both sides hardcode the port and path independently.
+ */
+const OIDC_DESKTOP_LOOPBACK_REDIRECT_URI = "http://127.0.0.1:34339/callback";
+
+export function hasDesktopOidcLoginBridge(): boolean {
+  return typeof window !== "undefined" && typeof window.desktopOidcLogin === "function";
+}
+
 // Discovery is per-issuer and effectively static for the app's lifetime, so a
 // single in-flight/failed lookup is shared across every caller rather than
 // re-fetched per sign-in attempt or token refresh.
@@ -247,14 +259,58 @@ function sessionFromTokenResponse(
 }
 
 /**
+ * Desktop counterpart to the redirect flow below: the authorization-code
+ * round trip happens in the system browser via a loopback listener owned by
+ * the Electron main process, so there is no page navigation and nothing to
+ * stash in sessionStorage -- the verifier just stays in this async call's
+ * memory until the code comes back.
+ */
+async function oidcSignInViaDesktopBridge(
+  config: { readonly issuerUrl: string; readonly clientId: string },
+  metadata: OidcProviderMetadata,
+): Promise<void> {
+  const bridge = window.desktopOidcLogin;
+  if (!bridge) {
+    throw new OidcAuthError("The desktop sign-in bridge is unavailable.");
+  }
+  const verifier = generateOidcCodeVerifier();
+  const challenge = await computeOidcCodeChallenge(verifier);
+  const state = generateOidcState();
+  const authorizeUrl = buildConnectClerkAuthorizeUrl({
+    authorizationEndpoint: metadata.authorizationEndpoint,
+    clientId: config.clientId,
+    redirectUri: OIDC_DESKTOP_LOOPBACK_REDIRECT_URI,
+    scopes: OIDC_SCOPES,
+    state,
+    challenge,
+  });
+  const { code } = await bridge(authorizeUrl, state);
+  const tokenResponse = await requestOidcToken(metadata.tokenEndpoint, {
+    grant_type: "authorization_code",
+    client_id: config.clientId,
+    code,
+    redirect_uri: OIDC_DESKTOP_LOOPBACK_REDIRECT_URI,
+    code_verifier: verifier,
+  });
+  writeStoredSession(sessionFromTokenResponse(tokenResponse, null));
+}
+
+/**
  * Starts the authorization-code + PKCE redirect. Resolves the issuer's
  * discovery document, stashes the verifier/state/return path in
- * sessionStorage, then leaves the page — nothing after the call runs.
+ * sessionStorage, then leaves the page — nothing after the call runs. On
+ * Electron with the loopback bridge available, delegates to
+ * `oidcSignInViaDesktopBridge` instead and returns once that sign-in
+ * completes (or throws).
  */
 export async function oidcSignIn(returnTo?: string): Promise<void> {
   const config = resolveOidcWebAuthConfig();
   if (!config) return;
   const metadata = await discoverOidcMetadata(config.issuerUrl);
+  if (hasDesktopOidcLoginBridge()) {
+    await oidcSignInViaDesktopBridge(config, metadata);
+    return;
+  }
   const verifier = generateOidcCodeVerifier();
   const challenge = await computeOidcCodeChallenge(verifier);
   const state = generateOidcState();

@@ -52,9 +52,10 @@ export function activateManagedRelayAuthentication(
  * consumers (the sidebar sign-in, `useCloudLinkController`, the onboarding
  * dialog, the hosted CLI connect page) do not need to know which one is
  * active. `mode` reflects whether a real provider is mounted for the current
- * runtime, not just whether config is present — Electron leaves OIDC
- * unmounted (see main.tsx), so `useCloudAuth()` reports unavailable there
- * even though `cloudAuthMode()` still says "oidc".
+ * runtime, not just whether config is present — main.tsx only mounts the
+ * OIDC provider on Electron once the desktop loopback sign-in bridge is
+ * present, so `useCloudAuth()` can still report unavailable there even
+ * though `cloudAuthMode()` says "oidc" (e.g. an old preload bundle).
  */
 export interface CloudAuthState {
   readonly mode: "clerk" | "oidc" | null;
@@ -203,9 +204,11 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
 }
 
 /**
- * Web-only counterpart to `ManagedRelayAuthProvider` for generic-OIDC mode
- * (see main.tsx — Electron does not mount this yet). Session state comes
- * from `oidcAuth`'s localStorage-backed atom instead of the Clerk SDK.
+ * Counterpart to `ManagedRelayAuthProvider` for generic-OIDC mode, shared by
+ * web and Electron (see main.tsx for the mount gate). `oidcSignIn` itself
+ * picks the redirect flow or the desktop loopback bridge depending on the
+ * runtime. Session state comes from `oidcAuth`'s localStorage-backed atom
+ * instead of the Clerk SDK.
  */
 export function OidcManagedRelayAuthProvider({ children }: { readonly children: ReactNode }) {
   const snapshot = useOidcAuthSnapshot();

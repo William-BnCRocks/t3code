@@ -11,6 +11,12 @@ import * as IpcChannels from "./ipc/channels.ts";
 
 exposeClerkBridge({ passkeys: true });
 
+contextBridge.exposeInMainWorld(
+  "desktopOidcLogin",
+  (authorizeUrl: string, state: string): Promise<{ code: string }> =>
+    ipcRenderer.invoke(IpcChannels.OIDC_LOGIN_CHANNEL, { authorizeUrl, state }),
+);
+
 function unwrapEnsureSshEnvironmentResult(result: unknown) {
   if (
     typeof result === "object" &&
