@@ -6,6 +6,8 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
@@ -188,19 +190,24 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
 ) {
   const shell = yield* ElectronShell.ElectronShell;
   const loginTimeoutMs = options.loginTimeoutMs ?? DEFAULT_OIDC_LOGIN_TIMEOUT_MS;
-  // The active attempt's deferred. A newer sign-in click supersedes the
-  // previous attempt (failing its deferred so its listener shuts down)
-  // instead of erroring: an abandoned attempt must never block a retry for
-  // the full browser timeout.
-  const activeRef = yield* Ref.make<Deferred.Deferred<
+  // The running attempt's fiber. A newer sign-in interrupts the previous one
+  // and awaits its teardown (closing its scope, freeing the loopback port)
+  // before starting, so overlapping attempts can never collide on the port.
+  const activeRef = yield* Ref.make<Fiber.Fiber<
     DesktopOidcLoginResult,
     DesktopOidcLoginError
   > | null>(null);
 
-  const runLogin = Effect.fn("desktop.oidcLogin.run")(function* (
-    input: DesktopOidcLoginInput,
-    deferred: Deferred.Deferred<DesktopOidcLoginResult, DesktopOidcLoginError>,
-  ) {
+  const runLogin = Effect.fn("desktop.oidcLogin.run")(function* (input: DesktopOidcLoginInput) {
+    const deferred = yield* Deferred.make<DesktopOidcLoginResult, DesktopOidcLoginError>();
+
+    // Close the browser connection as soon as the result page is delivered so
+    // the loopback server has no keep-alive socket to wait on when it tears
+    // down; without this a graceful shutdown blocks and a preemptive one races
+    // the response.
+    const resultPage = (page: string) =>
+      HttpServerResponse.html(page).pipe(HttpServerResponse.setHeader("connection", "close"));
+
     const callbackRoute = HttpRouter.add(
       "GET",
       OIDC_LOOPBACK_CALLBACK_PATH,
@@ -211,14 +218,14 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
 
         switch (outcome._tag) {
           case "malformed":
-            return HttpServerResponse.html(FAILURE_PAGE).pipe(HttpServerResponse.setStatus(400));
+            return resultPage(FAILURE_PAGE).pipe(HttpServerResponse.setStatus(400));
           case "denied":
           case "state-mismatch":
             yield* Deferred.complete(deferred, Effect.fail(outcome.error));
-            return HttpServerResponse.html(FAILURE_PAGE);
+            return resultPage(FAILURE_PAGE);
           case "success":
             yield* Deferred.complete(deferred, Effect.succeed(outcome.result));
-            return HttpServerResponse.html(SUCCESS_PAGE);
+            return resultPage(SUCCESS_PAGE);
         }
       }),
     );
@@ -226,15 +233,14 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
     // A superseded attempt's listener closes asynchronously with its scope,
     // so the replacement may briefly race it for the port; retry the bind
     // before declaring the port unavailable.
+    // A prior attempt is fully interrupted (its scope closed, its port freed)
+    // before this one is forked, so a bind collision should not happen; the
+    // short retry only absorbs the OS releasing the socket a beat late.
     yield* HttpRouter.serve(callbackRoute, {
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
       Layer.provide(
-        // Preemptive shutdown (the default) is required: the browser keeps the
-        // callback connection alive while showing the result page, so a
-        // graceful shutdown would block the login fiber from ever returning
-        // the captured code. Bound the wait so shutdown can never stall.
         NodeHttpServer.layer(NodeHttp.createServer, {
           host: OIDC_LOOPBACK_HOST,
           port: OIDC_LOOPBACK_PORT,
@@ -264,19 +270,26 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
 
   const login: DesktopOidcLogin["Service"]["login"] = Effect.fn("desktop.oidcLogin.login")(
     function* (input) {
-      const deferred = yield* Deferred.make<DesktopOidcLoginResult, DesktopOidcLoginError>();
-      const previous = yield* Ref.getAndSet(activeRef, deferred);
+      // Interrupting the previous attempt awaits its finalizers, so its server
+      // is fully shut down and its port released before this attempt binds.
+      const previous = yield* Ref.getAndSet(activeRef, null);
       if (previous !== null) {
-        yield* Deferred.complete(previous, Effect.fail(new DesktopOidcLoginSupersededError()));
+        yield* Fiber.interrupt(previous);
       }
 
-      // Only clear the slot if it still belongs to this attempt; a newer
-      // login may have taken it over while this one was finishing.
-      const releaseSlot = Ref.update(activeRef, (current) =>
-        current === deferred ? null : current,
-      );
+      const fiber = yield* Effect.forkDetach(runLogin(input).pipe(Effect.scoped));
+      yield* Ref.set(activeRef, fiber);
 
-      return yield* runLogin(input, deferred).pipe(Effect.scoped, Effect.ensuring(releaseSlot));
+      const exit = yield* Fiber.await(fiber);
+      yield* Ref.update(activeRef, (current) => (current === fiber ? null : current));
+
+      // This attempt's fiber is only interrupted when a newer sign-in
+      // supersedes it; surface that as a clean, typed outcome rather than a
+      // raw fiber interruption.
+      if (Exit.hasInterrupts(exit)) {
+        return yield* new DesktopOidcLoginSupersededError();
+      }
+      return yield* exit;
     },
   );
 
