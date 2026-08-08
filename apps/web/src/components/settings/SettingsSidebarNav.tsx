@@ -98,7 +98,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       <SidebarFooter className="p-2">
         <T3ConnectSidebarSignIn />
         <div className="flex items-center gap-1">
-          <SidebarMenu className="min-w-0 flex-1">
+          <SidebarMenu className="shrink-0">
             <SidebarMenuItem>
               <SidebarMenuButton onClick={handleBackClick}>
                 <ArrowLeftIcon />
@@ -106,7 +106,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
-          <T3ConnectSidebarAvatar />
+          <div className="flex min-w-0 flex-1 justify-end">
+            <T3ConnectSidebarAvatar />
+          </div>
         </div>
       </SidebarFooter>
     </>

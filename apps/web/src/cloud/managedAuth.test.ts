@@ -6,7 +6,13 @@ import {
   activateManagedRelayAuthentication,
   deactivateManagedRelayAuthentication,
   readManagedRelayClerkToken,
+  validateOidcSessionOnMount,
 } from "./managedAuth";
+
+const oidcAuth = vi.hoisted(() => ({
+  getOidcAccessToken: vi.fn(),
+  readOidcAuthSnapshot: vi.fn(),
+}));
 
 vi.mock("@clerk/react", () => ({
   useAuth: vi.fn(),
@@ -24,8 +30,29 @@ vi.mock("../connection/catalog", () => ({
   },
 }));
 
+vi.mock("./oidcAuth", () => oidcAuth);
+
 afterEach(() => {
   deactivateManagedRelayAuthentication();
+  vi.clearAllMocks();
+});
+
+describe("validateOidcSessionOnMount", () => {
+  it("forces a token validation when the restored snapshot claims signed-in", () => {
+    oidcAuth.readOidcAuthSnapshot.mockReturnValue({ isSignedIn: true });
+
+    validateOidcSessionOnMount();
+
+    expect(oidcAuth.getOidcAccessToken).toHaveBeenCalledOnce();
+  });
+
+  it("does nothing when the restored snapshot is already signed-out", () => {
+    oidcAuth.readOidcAuthSnapshot.mockReturnValue({ isSignedIn: false });
+
+    validateOidcSessionOnMount();
+
+    expect(oidcAuth.getOidcAccessToken).not.toHaveBeenCalled();
+  });
 });
 
 describe("managed relay authentication", () => {

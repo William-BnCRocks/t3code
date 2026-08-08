@@ -22,6 +22,15 @@ export interface CloudLinkDesiredState {
   readonly publish: boolean;
 }
 
+// A null token doesn't always mean signed out: with OIDC it can also be a
+// transient refresh failure (network loss, a momentarily unreachable
+// issuer) that `getOidcAccessToken` reports as null rather than throwing.
+export function describeMissingTokenFailure(isSignedIn: boolean): string {
+  return isSignedIn
+    ? "Could not refresh your T3 Connect session. Check your connection and try again."
+    : "Sign in to T3 Connect before enabling this.";
+}
+
 /**
  * Drives the primary environment's T3 Connect link. T3 Connect (managed
  * tunnel) and agent-activity publishing are independent capabilities backed by
@@ -111,7 +120,7 @@ export function useCloudLinkController() {
       }
       const clerkToken = tokenResult.value;
       if (!clerkToken) {
-        reportUpdateFailure(new Error("Sign in to T3 Connect before enabling this."));
+        reportUpdateFailure(new Error(describeMissingTokenFailure(isSignedIn)));
         return false;
       }
       if (!linked || managedTunnelActive !== desired.managedTunnel) {

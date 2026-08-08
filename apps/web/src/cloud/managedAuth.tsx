@@ -22,7 +22,13 @@ import { isElectron } from "../env";
 import { runtime } from "../lib/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useAtomCommand } from "../state/use-atom-command";
-import { getOidcAccessToken, oidcSignIn, oidcSignOut, useOidcAuthSnapshot } from "./oidcAuth";
+import {
+  getOidcAccessToken,
+  oidcSignIn,
+  oidcSignOut,
+  readOidcAuthSnapshot,
+  useOidcAuthSnapshot,
+} from "./oidcAuth";
 import { resolveRelayClerkTokenOptions } from "./publicConfig";
 
 let relayTokenProvider: (() => Promise<string | null>) | null = null;
@@ -204,6 +210,19 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
 }
 
 /**
+ * A session restored from localStorage at module load may have expired while
+ * the tab was closed, so the snapshot alone can claim signed-in when the
+ * access token is actually dead. Forcing one `getOidcAccessToken` call
+ * resolves that: a definitive failure clears the session (flipping the
+ * snapshot to signed-out), while a transient failure leaves it untouched.
+ */
+export function validateOidcSessionOnMount(): void {
+  if (readOidcAuthSnapshot().isSignedIn) {
+    void getOidcAccessToken();
+  }
+}
+
+/**
  * Counterpart to `ManagedRelayAuthProvider` for generic-OIDC mode, shared by
  * web and Electron (see main.tsx for the mount gate). `oidcSignIn` itself
  * picks the redirect flow or the desktop loopback bridge depending on the
@@ -212,6 +231,13 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
  */
 export function OidcManagedRelayAuthProvider({ children }: { readonly children: ReactNode }) {
   const snapshot = useOidcAuthSnapshot();
+  const didValidateOnMountRef = useRef(false);
+
+  useEffect(() => {
+    if (didValidateOnMountRef.current) return;
+    didValidateOnMountRef.current = true;
+    validateOidcSessionOnMount();
+  }, []);
 
   useManagedRelayAccountLifecycle({
     isLoaded: true,

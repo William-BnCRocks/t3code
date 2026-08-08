@@ -1,8 +1,20 @@
 import { UserButton } from "@clerk/react";
-import { LogInIcon, LogOutIcon, SmartphoneIcon } from "lucide-react";
+import { CircleUserRoundIcon, LogInIcon, LogOutIcon, SmartphoneIcon } from "lucide-react";
+import { useState } from "react";
 
 import { useCloudAuth } from "../../cloud/managedAuth";
-import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
+import { Button } from "../ui/button";
+import { SidebarMenu, SidebarMenuAction, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MobileClientsUserProfilePage } from "./MobileClientsUserProfilePage";
 import { useT3ConnectAuthPrompt } from "./useT3ConnectAuthPrompt";
 
@@ -60,8 +72,9 @@ function ClerkT3ConnectSidebarAvatar() {
 /**
  * Generic-OIDC providers have no equivalent to Clerk's `<UserButton>` widget
  * (and no analogue for its mobile-client device management), so signed-in
- * state gets a plain identity row with a sign-out action instead — reusing
- * the same sidebar menu button used for the signed-out prompt above.
+ * state gets a plain identity row instead. The row itself is inert — signing
+ * out drops every relay environment linked on this device, so it needs its
+ * own confirmed affordance rather than firing on a stray click of the row.
  */
 function OidcT3ConnectSidebarAvatar({
   displayIdentity,
@@ -69,15 +82,54 @@ function OidcT3ConnectSidebarAvatar({
   readonly displayIdentity: string | null;
 }) {
   const cloudAuth = useCloudAuth();
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false);
 
   return (
-    <SidebarMenu>
-      <SidebarMenuItem>
-        <SidebarMenuButton onClick={() => void cloudAuth.signOut()}>
-          <LogOutIcon />
-          <span className="truncate">{displayIdentity ?? "Signed in"}</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-    </SidebarMenu>
+    <>
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton className="cursor-default" render={<div />}>
+            <CircleUserRoundIcon />
+            <span className="truncate">{displayIdentity ?? "Signed in"}</span>
+          </SidebarMenuButton>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <SidebarMenuAction
+                  aria-label="Sign out of T3 Connect"
+                  onClick={() => setConfirmingSignOut(true)}
+                />
+              }
+            >
+              <LogOutIcon />
+            </TooltipTrigger>
+            <TooltipPopup side="top">Sign out of T3 Connect</TooltipPopup>
+          </Tooltip>
+        </SidebarMenuItem>
+      </SidebarMenu>
+      <AlertDialog open={confirmingSignOut} onOpenChange={setConfirmingSignOut}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sign out of T3 Connect?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This drops every relay environment linked on this device. You can sign back in at any
+              time.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setConfirmingSignOut(false);
+                void cloudAuth.signOut();
+              }}
+            >
+              Sign out
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
   );
 }
