@@ -8,6 +8,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -31,6 +32,15 @@ export class DesktopOidcLoginAlreadyInProgressError extends Schema.TaggedErrorCl
 ) {
   override get message(): string {
     return "A sign-in is already in progress in the browser.";
+  }
+}
+
+export class DesktopOidcLoginSupersededError extends Schema.TaggedErrorClass<DesktopOidcLoginSupersededError>()(
+  "DesktopOidcLoginSupersededError",
+  {},
+) {
+  override get message(): string {
+    return "This sign-in was replaced by a newer attempt.";
   }
 }
 
@@ -86,6 +96,7 @@ export class DesktopOidcLoginDeniedError extends Schema.TaggedErrorClass<Desktop
 
 export type DesktopOidcLoginError =
   | DesktopOidcLoginAlreadyInProgressError
+  | DesktopOidcLoginSupersededError
   | DesktopOidcLoginPortUnavailableError
   | DesktopOidcLoginBrowserOpenError
   | DesktopOidcLoginTimedOutError
@@ -177,16 +188,19 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
 ) {
   const shell = yield* ElectronShell.ElectronShell;
   const loginTimeoutMs = options.loginTimeoutMs ?? DEFAULT_OIDC_LOGIN_TIMEOUT_MS;
-  const lockedRef = yield* Ref.make(false);
+  // The active attempt's deferred. A newer sign-in click supersedes the
+  // previous attempt (failing its deferred so its listener shuts down)
+  // instead of erroring: an abandoned attempt must never block a retry for
+  // the full browser timeout.
+  const activeRef = yield* Ref.make<Deferred.Deferred<
+    DesktopOidcLoginResult,
+    DesktopOidcLoginError
+  > | null>(null);
 
-  const acquireLock = Ref.modify(lockedRef, (locked) =>
-    locked ? ([false, locked] as const) : ([true, true] as const),
-  );
-  const releaseLock = Ref.set(lockedRef, false);
-
-  const runLogin = Effect.fn("desktop.oidcLogin.run")(function* (input: DesktopOidcLoginInput) {
-    const deferred = yield* Deferred.make<DesktopOidcLoginResult, DesktopOidcLoginError>();
-
+  const runLogin = Effect.fn("desktop.oidcLogin.run")(function* (
+    input: DesktopOidcLoginInput,
+    deferred: Deferred.Deferred<DesktopOidcLoginResult, DesktopOidcLoginError>,
+  ) {
     const callbackRoute = HttpRouter.add(
       "GET",
       OIDC_LOOPBACK_CALLBACK_PATH,
@@ -209,6 +223,9 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
       }),
     );
 
+    // A superseded attempt's listener closes asynchronously with its scope,
+    // so the replacement may briefly race it for the port; retry the bind
+    // before declaring the port unavailable.
     yield* HttpRouter.serve(callbackRoute, {
       disableListenLog: true,
       disableLogger: true,
@@ -221,6 +238,10 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
         }),
       ),
       Layer.build,
+      Effect.retry({
+        times: 14,
+        schedule: Schedule.spaced(Duration.millis(100)),
+      }),
       Effect.mapError(
         (cause) => new DesktopOidcLoginPortUnavailableError({ port: OIDC_LOOPBACK_PORT, cause }),
       ),
@@ -239,12 +260,19 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
 
   const login: DesktopOidcLogin["Service"]["login"] = Effect.fn("desktop.oidcLogin.login")(
     function* (input) {
-      const acquired = yield* acquireLock;
-      if (!acquired) {
-        return yield* new DesktopOidcLoginAlreadyInProgressError();
+      const deferred = yield* Deferred.make<DesktopOidcLoginResult, DesktopOidcLoginError>();
+      const previous = yield* Ref.getAndSet(activeRef, deferred);
+      if (previous !== null) {
+        yield* Deferred.complete(previous, Effect.fail(new DesktopOidcLoginSupersededError()));
       }
 
-      return yield* runLogin(input).pipe(Effect.scoped, Effect.ensuring(releaseLock));
+      // Only clear the slot if it still belongs to this attempt; a newer
+      // login may have taken it over while this one was finishing.
+      const releaseSlot = Ref.update(activeRef, (current) =>
+        current === deferred ? null : current,
+      );
+
+      return yield* runLogin(input, deferred).pipe(Effect.scoped, Effect.ensuring(releaseSlot));
     },
   );
 

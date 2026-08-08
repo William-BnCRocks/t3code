@@ -74,6 +74,9 @@ describe("error messages", () => {
     expect(new DesktopOidcLogin.DesktopOidcLoginAlreadyInProgressError({}).message).toMatch(
       /already in progress/,
     );
+    expect(new DesktopOidcLogin.DesktopOidcLoginSupersededError({}).message).toMatch(
+      /replaced by a newer attempt/,
+    );
     expect(
       new DesktopOidcLogin.DesktopOidcLoginPortUnavailableError({
         port: DesktopOidcLogin.OIDC_LOOPBACK_PORT,
