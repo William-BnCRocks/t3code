@@ -24,6 +24,12 @@ const TEST_ENV = {
   T3CODE_HOSTED_APP_URL: "https://hosted.example.test",
 };
 
+const OIDC_TEST_ENV = {
+  T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+  T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_test",
+  T3CODE_HOSTED_APP_URL: "https://hosted.example.test",
+};
+
 interface RecordedTokenRequest {
   readonly url: string;
   readonly params: URLSearchParams;
@@ -53,6 +59,15 @@ const TestTokenResponseJson = Schema.fromJsonString(
   }),
 );
 const encodeTestTokenResponse = Schema.encodeSync(TestTokenResponseJson);
+
+const TestOidcDiscoveryDocumentJson = Schema.fromJsonString(
+  Schema.Struct({
+    issuer: Schema.String,
+    authorization_endpoint: Schema.String,
+    token_endpoint: Schema.String,
+  }),
+);
+const encodeTestOidcDiscoveryDocument = Schema.encodeSync(TestOidcDiscoveryDocumentJson);
 
 const makeTokenEndpointLayer = (
   requests: Array<RecordedTokenRequest>,
@@ -85,6 +100,48 @@ const makeTokenEndpointLayer = (
 const provideTestEnv = Effect.provide(
   ConfigProvider.layer(ConfigProvider.fromEnv({ env: TEST_ENV })),
 );
+
+const provideOidcTestEnv = Effect.provide(
+  ConfigProvider.layer(ConfigProvider.fromEnv({ env: OIDC_TEST_ENV })),
+);
+
+const makeOidcDiscoveryAndTokenLayer = (requests: Array<RecordedTokenRequest>) =>
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make((request) =>
+      Effect.sync(() => {
+        if (request.url === "https://auth.example.test/.well-known/openid-configuration") {
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(
+              encodeTestOidcDiscoveryDocument({
+                issuer: "https://auth.example.test",
+                authorization_endpoint: "https://auth.example.test/authorize",
+                token_endpoint: "https://auth.example.test/token",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        const body =
+          request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
+        requests.push({ url: request.url, params: new URLSearchParams(body) });
+        return HttpClientResponse.fromWeb(
+          request,
+          new Response(
+            encodeTestTokenResponse({
+              access_token: "oidc-access-token-1",
+              refresh_token: "oidc-refresh-token-1",
+              id_token: idTokenWithEmail,
+              expires_in: 3600,
+              token_type: "bearer",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }),
+    ),
+  );
 
 const isAuthorizationError = Schema.is(CliTokenManager.CloudCliAuthorizationError);
 
@@ -261,4 +318,42 @@ it.layer(NodeServices.layer)("CliTokenManager.outOfBandOAuthLogin", (it) => {
       assert.isTrue(isAuthorizationError(result));
     }),
   );
+
+  it.effect("discovers OIDC endpoints and exchanges the out-of-band code against them", () =>
+    Effect.gen(function* () {
+      const requests: Array<RecordedTokenRequest> = [];
+
+      const { token } = yield* CliTokenManager.outOfBandOAuthLogin(
+        ({ authorizeUrl }: OutOfBandOAuthPromptInput) => {
+          const request = readConnectAuthorizeRequest(new URL(authorizeUrl));
+          assert.isNotNull(request);
+          return Effect.succeed(`oidc-code-123.${request!.state}`);
+        },
+      ).pipe(Effect.provide(makeOidcDiscoveryAndTokenLayer(requests)), provideOidcTestEnv);
+
+      assert.equal(token.accessToken, "oidc-access-token-1");
+      assert.equal(token.refreshToken, "oidc-refresh-token-1");
+
+      assert.lengthOf(requests, 1);
+      const exchange = requests[0]!;
+      assert.equal(exchange.url, "https://auth.example.test/token");
+      assert.equal(exchange.params.get("client_id"), "oidc_client_test");
+    }),
+  );
 });
+
+it.effect(
+  "fails a refresh without calling the token endpoint when the stored credential has no refresh token",
+  () =>
+    Effect.gen(function* () {
+      const requests: Array<RecordedTokenRequest> = [];
+
+      const result = yield* CliTokenManager.refresh({
+        accessToken: "expired-access-token",
+        expiresAtEpochMs: 0,
+      }).pipe(Effect.provide(makeTokenEndpointLayer(requests)), provideTestEnv, Effect.flip);
+
+      assert.lengthOf(requests, 0);
+      assert.instanceOf(result, CliTokenManager.CloudCliRefreshTokenUnavailableError);
+    }),
+);

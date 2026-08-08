@@ -22,6 +22,11 @@ describe("loadRepoEnv", () => {
     expect(env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID).toBeUndefined();
     expect(env.VITE_CLERK_PUBLISHABLE_KEY).toBeUndefined();
     expect(env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY).toBeUndefined();
+    expect(env.T3CODE_OIDC_ISSUER_URL).toBeUndefined();
+    expect(env.VITE_OIDC_ISSUER_URL).toBeUndefined();
+    expect(env.EXPO_PUBLIC_OIDC_ISSUER_URL).toBeUndefined();
+    expect(env.T3CODE_OIDC_CLI_CLIENT_ID).toBeUndefined();
+    expect(env.VITE_OIDC_CLI_CLIENT_ID).toBeUndefined();
     expect(env.T3CODE_CLERK_JWT_TEMPLATE).toBeUndefined();
     expect(env.VITE_CLERK_JWT_TEMPLATE).toBeUndefined();
     expect(env.EXPO_PUBLIC_CLERK_JWT_TEMPLATE).toBeUndefined();
@@ -93,6 +98,10 @@ describe("loadRepoEnv", () => {
       clerkPublishableKey: "pk_legacy",
       clerkJwtTemplate: "template_legacy",
       clerkCliOAuthClientId: "oauth_canonical",
+      oidcIssuerUrl: undefined,
+      oidcCliClientId: undefined,
+      oidcWebClientId: undefined,
+      oidcMobileClientId: undefined,
       relayUrl: "https://legacy.example.test",
       mobileOtlpTracesUrl: "https://api.axiom.co/v1/traces",
       mobileOtlpTracesDataset: "mobile-traces",
@@ -100,6 +109,30 @@ describe("loadRepoEnv", () => {
       relayClientOtlpTracesUrl: undefined,
       relayClientOtlpTracesDataset: undefined,
       relayClientOtlpTracesToken: undefined,
+    });
+  });
+
+  it("projects canonical OIDC values to web and mobile build aliases", () => {
+    expect(
+      loadRepoEnv({
+        baseEnv: {
+          T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+          T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_canonical",
+          T3CODE_OIDC_WEB_CLIENT_ID: "oidc_client_web",
+          T3CODE_OIDC_MOBILE_CLIENT_ID: "oidc_client_mobile",
+        },
+        repoRoot: makeTemporaryDirectory(),
+      }),
+    ).toMatchObject({
+      T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+      VITE_OIDC_ISSUER_URL: "https://auth.example.test",
+      EXPO_PUBLIC_OIDC_ISSUER_URL: "https://auth.example.test",
+      T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_canonical",
+      VITE_OIDC_CLI_CLIENT_ID: "oidc_client_canonical",
+      T3CODE_OIDC_WEB_CLIENT_ID: "oidc_client_web",
+      VITE_OIDC_WEB_CLIENT_ID: "oidc_client_web",
+      T3CODE_OIDC_MOBILE_CLIENT_ID: "oidc_client_mobile",
+      EXPO_PUBLIC_OIDC_MOBILE_CLIENT_ID: "oidc_client_mobile",
     });
   });
 

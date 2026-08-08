@@ -30,13 +30,14 @@ import {
   checkConnectAuthCode,
   connectCallbackUrl,
 } from "@t3tools/shared/connectAuth";
+import { discoverOidcConfiguration } from "@t3tools/shared/oidcDiscovery";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import {
   cloudCliOAuthConfig,
   hostedAppUrlConfig,
-  type CloudCliOAuthConfig,
+  isOidcCloudCliOAuthConfig,
 } from "./publicConfig.ts";
 import { renderLoopbackAuthorizationCompleteHtml } from "./cliAuthHtml.ts";
 
@@ -118,7 +119,7 @@ export const waitForLoopbackAuthorization = Effect.fn(
 
 const PersistedToken = Schema.Struct({
   accessToken: Schema.String,
-  refreshToken: Schema.String,
+  refreshToken: Schema.optional(Schema.String),
   expiresAtEpochMs: Schema.Number,
   identity: Schema.optional(Schema.String),
 });
@@ -241,8 +242,16 @@ function bytesToString(value: Uint8Array): string {
   return new TextDecoder().decode(value);
 }
 
+interface ResolvedCloudCliOAuthMetadata {
+  readonly authorizationEndpoint: string;
+  readonly tokenEndpoint: string;
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly scopes: ReadonlyArray<string>;
+}
+
 const exchangeToken = Effect.fn("cloud.cli_token.exchange")(function* (
-  metadata: Pick<CloudCliOAuthConfig, "tokenEndpoint">,
+  metadata: Pick<ResolvedCloudCliOAuthMetadata, "tokenEndpoint">,
   params: Record<string, string>,
 ) {
   const httpClient = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
@@ -253,15 +262,60 @@ const exchangeToken = Effect.fn("cloud.cli_token.exchange")(function* (
   );
   const now = yield* Clock.currentTimeMillis;
   const identity = idTokenIdentity(response.id_token);
+  const refreshToken = response.refresh_token ?? params.refresh_token;
   return {
     token: {
       accessToken: response.access_token,
-      refreshToken: response.refresh_token ?? params.refresh_token ?? "",
+      ...(refreshToken === undefined ? {} : { refreshToken }),
       expiresAtEpochMs: now + response.expires_in * 1_000,
       ...(identity === null ? {} : { identity }),
     } satisfies PersistedToken,
     identity,
   };
+});
+
+/**
+ * Resolves the OAuth endpoints the PKCE flow needs to talk to. Clerk config
+ * already carries static endpoints; generic-OIDC config only carries an
+ * issuer, so its authorize/token endpoints are discovered on demand.
+ */
+const resolveCloudCliOAuthMetadata = Effect.fn("cloud.cli_token.resolve_oauth_metadata")(
+  function* () {
+    const config = yield* cloudCliOAuthConfig;
+    if (!isOidcCloudCliOAuthConfig(config)) return config;
+    const endpoints = yield* discoverOidcConfiguration(config.issuerUrl);
+    return {
+      authorizationEndpoint: endpoints.authorizationEndpoint,
+      tokenEndpoint: endpoints.tokenEndpoint,
+      clientId: config.clientId,
+      redirectUri: config.redirectUri,
+      scopes: config.scopes,
+    } satisfies ResolvedCloudCliOAuthMetadata;
+  },
+);
+
+export class CloudCliRefreshTokenUnavailableError extends Schema.TaggedErrorClass<CloudCliRefreshTokenUnavailableError>()(
+  "CloudCliRefreshTokenUnavailableError",
+  {},
+) {
+  override get message(): string {
+    return "No refresh token is available for this credential; sign in again.";
+  }
+}
+
+export const refresh = Effect.fn("cloud.cli_token.refresh")(function* (token: PersistedToken) {
+  if (!token.refreshToken) {
+    return yield* new CloudCliRefreshTokenUnavailableError({});
+  }
+  const metadata = yield* resolveCloudCliOAuthMetadata();
+  const { token: refreshed } = yield* exchangeToken(metadata, {
+    grant_type: "refresh_token",
+    refresh_token: token.refreshToken,
+    client_id: metadata.clientId,
+  });
+  return refreshed.identity === undefined && token.identity !== undefined
+    ? { ...refreshed, identity: token.identity }
+    : refreshed;
 });
 
 const makePkceRequest = Effect.gen(function* () {
@@ -290,7 +344,7 @@ export const outOfBandOAuthLogin = Effect.fn("cloud.cli_token.out_of_band_oauth_
   E,
   R,
 >(promptForCode: (input: OutOfBandOAuthPromptInput) => Effect.Effect<string, E, R>) {
-  const metadata = yield* cloudCliOAuthConfig;
+  const metadata = yield* resolveCloudCliOAuthMetadata();
   const hostedAppUrl = yield* hostedAppUrlConfig;
   const { verifier, challenge, state } = yield* makePkceRequest;
 
@@ -353,20 +407,8 @@ export const make = Effect.gen(function* () {
     return Option.some(yield* decodePersistedToken(bytesToString(encoded.value)));
   });
 
-  const refresh = Effect.fn("cloud.cli_token.refresh")(function* (token: PersistedToken) {
-    const metadata = yield* cloudCliOAuthConfig;
-    const { token: refreshed } = yield* exchangeToken(metadata, {
-      grant_type: "refresh_token",
-      refresh_token: token.refreshToken,
-      client_id: metadata.clientId,
-    });
-    return refreshed.identity === undefined && token.identity !== undefined
-      ? { ...refreshed, identity: token.identity }
-      : refreshed;
-  });
-
   const login = Effect.fn("cloud.cli_token.login")(function* () {
-    const metadata = yield* cloudCliOAuthConfig;
+    const metadata = yield* resolveCloudCliOAuthMetadata();
     const { verifier, challenge, state } = yield* makePkceRequest;
     const callback = yield* Deferred.make<string>();
     const callbackRoute = HttpRouter.add(

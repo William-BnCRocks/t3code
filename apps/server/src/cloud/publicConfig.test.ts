@@ -5,8 +5,10 @@ import * as Result from "effect/Result";
 
 import {
   hostedAppUrlConfig,
+  isOidcCloudCliOAuthConfig,
   makeCloudCliOAuthConfig,
   makeRelayUrlConfig,
+  resolveHasCloudPublicConfig,
   resolveRelayClientTracingConfig,
 } from "./publicConfig.ts";
 
@@ -111,6 +113,8 @@ it.effect("prefers runtime Clerk OAuth config overrides over statically injected
       }),
     );
 
+    assert.isFalse(isOidcCloudCliOAuthConfig(config));
+    if (isOidcCloudCliOAuthConfig(config)) return;
     assert.equal(config.authorizationEndpoint, "https://runtime.example.test/oauth/authorize");
     assert.equal(config.tokenEndpoint, "https://runtime.example.test/oauth/token");
     assert.equal(config.clientId, "oauth_client_runtime");
@@ -144,6 +148,96 @@ it.effect("reports malformed Clerk publishable keys as typed configuration failu
     }
   }),
 );
+
+it.effect("derives generic OIDC config with offline_access appended to the CLI scopes", () =>
+  Effect.gen(function* () {
+    const config = yield* makeCloudCliOAuthConfig({
+      clerkPublishableKeyFallback: "",
+      clerkCliOAuthClientIdFallback: "",
+    }).pipe(
+      provideEnv({
+        T3CODE_OIDC_ISSUER_URL: "https://auth.example.test/",
+        T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_runtime",
+      }),
+    );
+
+    assert.deepEqual(config, {
+      mode: "oidc",
+      issuerUrl: "https://auth.example.test",
+      clientId: "oidc_client_runtime",
+      redirectUri: "http://127.0.0.1:34338/callback",
+      scopes: ["openid", "profile", "email", "offline_access"],
+    });
+  }),
+);
+
+it.effect("prefers OIDC config over Clerk config when both are fully configured", () =>
+  Effect.gen(function* () {
+    const config = yield* makeCloudCliOAuthConfig({
+      clerkPublishableKeyFallback: "pk_test_Y2xlcmsuZXhhbXBsZS50ZXN0JA==",
+      clerkCliOAuthClientIdFallback: "oauth_client_embedded",
+    }).pipe(
+      provideEnv({
+        T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+        T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_runtime",
+      }),
+    );
+
+    assert.isTrue(isOidcCloudCliOAuthConfig(config));
+  }),
+);
+
+it.effect("falls back to Clerk config when OIDC config is incomplete", () =>
+  Effect.gen(function* () {
+    const config = yield* makeCloudCliOAuthConfig({
+      clerkPublishableKeyFallback: "pk_test_Y2xlcmsuZXhhbXBsZS50ZXN0JA==",
+      clerkCliOAuthClientIdFallback: "oauth_client_embedded",
+    }).pipe(provideEnv({ T3CODE_OIDC_ISSUER_URL: "https://auth.example.test" }));
+
+    assert.isFalse(isOidcCloudCliOAuthConfig(config));
+    if (isOidcCloudCliOAuthConfig(config)) return;
+    assert.equal(config.authorizationEndpoint, "https://clerk.example.test/oauth/authorize");
+  }),
+);
+
+it("computes hasCloudPublicConfig from an OIDC-only environment", () => {
+  assert.isTrue(
+    resolveHasCloudPublicConfig({
+      T3CODE_RELAY_URL: "https://relay.example.test",
+      T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+      T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_runtime",
+    }),
+  );
+});
+
+it("computes hasCloudPublicConfig from a Clerk-only environment", () => {
+  assert.isTrue(
+    resolveHasCloudPublicConfig({
+      T3CODE_RELAY_URL: "https://relay.example.test",
+      T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_Y2xlcmsuZXhhbXBsZS50ZXN0JA==",
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "oauth_client_runtime",
+    }),
+  );
+});
+
+it("reports no cloud public config when neither OIDC nor Clerk is fully configured", () => {
+  assert.isFalse(
+    resolveHasCloudPublicConfig({
+      T3CODE_RELAY_URL: "https://relay.example.test",
+      T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+      T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_Y2xlcmsuZXhhbXBsZS50ZXN0JA==",
+    }),
+  );
+});
+
+it("reports no cloud public config without a relay URL even if the CLI OAuth config is complete", () => {
+  assert.isFalse(
+    resolveHasCloudPublicConfig({
+      T3CODE_OIDC_ISSUER_URL: "https://auth.example.test",
+      T3CODE_OIDC_CLI_CLIENT_ID: "oidc_client_runtime",
+    }),
+  );
+});
 
 it("resolves relay client tracing from runtime config with build-time fallback", () => {
   const fallback = {

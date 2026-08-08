@@ -8,6 +8,10 @@ export interface T3CodePublicConfig {
   readonly clerkPublishableKey: string | undefined;
   readonly clerkJwtTemplate: string | undefined;
   readonly clerkCliOAuthClientId: string | undefined;
+  readonly oidcIssuerUrl: string | undefined;
+  readonly oidcCliClientId: string | undefined;
+  readonly oidcWebClientId: string | undefined;
+  readonly oidcMobileClientId: string | undefined;
   readonly relayUrl: string | undefined;
   readonly mobileOtlpTracesUrl: string | undefined;
   readonly mobileOtlpTracesDataset: string | undefined;
@@ -56,6 +60,31 @@ export function loadRepoEnv({
       ? {
           T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: config.clerkCliOAuthClientId,
           VITE_CLERK_CLI_OAUTH_CLIENT_ID: config.clerkCliOAuthClientId,
+        }
+      : {}),
+    ...(config.oidcIssuerUrl
+      ? {
+          T3CODE_OIDC_ISSUER_URL: config.oidcIssuerUrl,
+          VITE_OIDC_ISSUER_URL: config.oidcIssuerUrl,
+          EXPO_PUBLIC_OIDC_ISSUER_URL: config.oidcIssuerUrl,
+        }
+      : {}),
+    ...(config.oidcCliClientId
+      ? {
+          T3CODE_OIDC_CLI_CLIENT_ID: config.oidcCliClientId,
+          VITE_OIDC_CLI_CLIENT_ID: config.oidcCliClientId,
+        }
+      : {}),
+    ...(config.oidcWebClientId
+      ? {
+          T3CODE_OIDC_WEB_CLIENT_ID: config.oidcWebClientId,
+          VITE_OIDC_WEB_CLIENT_ID: config.oidcWebClientId,
+        }
+      : {}),
+    ...(config.oidcMobileClientId
+      ? {
+          T3CODE_OIDC_MOBILE_CLIENT_ID: config.oidcMobileClientId,
+          EXPO_PUBLIC_OIDC_MOBILE_CLIENT_ID: config.oidcMobileClientId,
         }
       : {}),
     ...(config.relayUrl
@@ -121,6 +150,19 @@ export function resolvePublicConfig(...sources: readonly Environment[]): T3CodeP
       sources,
       "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
       "VITE_CLERK_CLI_OAUTH_CLIENT_ID",
+    ),
+    oidcIssuerUrl: firstNonEmpty(
+      sources,
+      "T3CODE_OIDC_ISSUER_URL",
+      "VITE_OIDC_ISSUER_URL",
+      "EXPO_PUBLIC_OIDC_ISSUER_URL",
+    ),
+    oidcCliClientId: firstNonEmpty(sources, "T3CODE_OIDC_CLI_CLIENT_ID", "VITE_OIDC_CLI_CLIENT_ID"),
+    oidcWebClientId: firstNonEmpty(sources, "T3CODE_OIDC_WEB_CLIENT_ID", "VITE_OIDC_WEB_CLIENT_ID"),
+    oidcMobileClientId: firstNonEmpty(
+      sources,
+      "T3CODE_OIDC_MOBILE_CLIENT_ID",
+      "EXPO_PUBLIC_OIDC_MOBILE_CLIENT_ID",
     ),
     relayUrl: firstNonEmpty(sources, "T3CODE_RELAY_URL", "VITE_T3CODE_RELAY_URL"),
     mobileOtlpTracesUrl: firstNonEmpty(

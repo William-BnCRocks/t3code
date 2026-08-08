@@ -11,12 +11,15 @@ import * as SchemaIssue from "effect/SchemaIssue";
 declare const __T3CODE_BUILD_RELAY_URL__: string | undefined;
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 declare const __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__: string | undefined;
+declare const __T3CODE_BUILD_OIDC_ISSUER_URL__: string | undefined;
+declare const __T3CODE_BUILD_OIDC_CLI_CLIENT_ID__: string | undefined;
 declare const __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__: string | undefined;
 declare const __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__: string | undefined;
 declare const __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: string | undefined;
 
 const CLOUD_CLI_OAUTH_REDIRECT_URI = "http://127.0.0.1:34338/callback";
 const CLOUD_CLI_OAUTH_SCOPES = CONNECT_OAUTH_SCOPES;
+const OIDC_CLOUD_CLI_OAUTH_SCOPES = [...CONNECT_OAUTH_SCOPES, "offline_access"] as const;
 
 function validateRelayUrl(value: string) {
   const relayUrl = normalizeSecureRelayUrl(value);
@@ -59,6 +62,16 @@ export const buildTimeClerkCliOAuthClientId = readBuildTimeValue(
   typeof __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__ === "undefined"
     ? undefined
     : __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__,
+);
+export const buildTimeOidcIssuerUrl = readBuildTimeValue(
+  typeof __T3CODE_BUILD_OIDC_ISSUER_URL__ === "undefined"
+    ? undefined
+    : __T3CODE_BUILD_OIDC_ISSUER_URL__,
+);
+export const buildTimeOidcCliClientId = readBuildTimeValue(
+  typeof __T3CODE_BUILD_OIDC_CLI_CLIENT_ID__ === "undefined"
+    ? undefined
+    : __T3CODE_BUILD_OIDC_CLI_CLIENT_ID__,
 );
 export const buildTimeRelayClientTracing = {
   tracesUrl: readBuildTimeValue(
@@ -146,7 +159,7 @@ function makePublicValueConfig(name: string, fallback: string) {
   );
 }
 
-export interface CloudCliOAuthConfig {
+export interface CloudCliOAuthClerkConfig {
   readonly authorizationEndpoint: string;
   readonly tokenEndpoint: string;
   readonly clientId: string;
@@ -154,22 +167,51 @@ export interface CloudCliOAuthConfig {
   readonly scopes: typeof CLOUD_CLI_OAUTH_SCOPES;
 }
 
-export function makeCloudCliOAuthConfig({
-  clerkPublishableKeyFallback = buildTimeClerkPublishableKey,
-  clerkCliOAuthClientIdFallback = buildTimeClerkCliOAuthClientId,
-}: {
-  readonly clerkPublishableKeyFallback?: string;
-  readonly clerkCliOAuthClientIdFallback?: string;
-} = {}) {
+export interface CloudCliOAuthOidcConfig {
+  readonly mode: "oidc";
+  readonly issuerUrl: string;
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly scopes: typeof OIDC_CLOUD_CLI_OAUTH_SCOPES;
+}
+
+export type CloudCliOAuthConfig = CloudCliOAuthClerkConfig | CloudCliOAuthOidcConfig;
+
+export function isOidcCloudCliOAuthConfig(
+  config: CloudCliOAuthConfig,
+): config is CloudCliOAuthOidcConfig {
+  return "mode" in config;
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/u, "");
+}
+
+function makeOidcCloudCliOAuthConfig(issuerUrlFallback: string, clientIdFallback: string) {
+  return Config.all({
+    issuerUrl: makePublicValueConfig("T3CODE_OIDC_ISSUER_URL", issuerUrlFallback),
+    clientId: makePublicValueConfig("T3CODE_OIDC_CLI_CLIENT_ID", clientIdFallback),
+  }).pipe(
+    Config.map(
+      ({ issuerUrl, clientId }) =>
+        ({
+          mode: "oidc",
+          issuerUrl: stripTrailingSlash(issuerUrl),
+          clientId,
+          redirectUri: CLOUD_CLI_OAUTH_REDIRECT_URI,
+          scopes: OIDC_CLOUD_CLI_OAUTH_SCOPES,
+        }) satisfies CloudCliOAuthOidcConfig,
+    ),
+  );
+}
+
+function makeClerkCloudCliOAuthConfig(publishableKeyFallback: string, clientIdFallback: string) {
   return Config.all({
     clerkPublishableKey: makePublicValueConfig(
       "T3CODE_CLERK_PUBLISHABLE_KEY",
-      clerkPublishableKeyFallback,
+      publishableKeyFallback,
     ),
-    clientId: makePublicValueConfig(
-      "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
-      clerkCliOAuthClientIdFallback,
-    ),
+    clientId: makePublicValueConfig("T3CODE_CLERK_CLI_OAUTH_CLIENT_ID", clientIdFallback),
   }).pipe(
     Config.mapOrFail(({ clerkPublishableKey, clientId }) =>
       Effect.try({
@@ -190,17 +232,65 @@ export function makeCloudCliOAuthConfig({
               clientId,
               redirectUri: CLOUD_CLI_OAUTH_REDIRECT_URI,
               scopes: CLOUD_CLI_OAUTH_SCOPES,
-            }) satisfies CloudCliOAuthConfig,
+            }) satisfies CloudCliOAuthClerkConfig,
         ),
       ),
     ),
   );
 }
 
+/**
+ * OIDC config takes precedence when both are present: it is tried first and
+ * only falls back to deriving Clerk endpoints when the OIDC issuer/client
+ * pair is not fully configured.
+ */
+export function makeCloudCliOAuthConfig({
+  clerkPublishableKeyFallback = buildTimeClerkPublishableKey,
+  clerkCliOAuthClientIdFallback = buildTimeClerkCliOAuthClientId,
+  oidcIssuerUrlFallback = buildTimeOidcIssuerUrl,
+  oidcCliClientIdFallback = buildTimeOidcCliClientId,
+}: {
+  readonly clerkPublishableKeyFallback?: string;
+  readonly clerkCliOAuthClientIdFallback?: string;
+  readonly oidcIssuerUrlFallback?: string;
+  readonly oidcCliClientIdFallback?: string;
+} = {}): Config.Config<CloudCliOAuthConfig> {
+  return makeOidcCloudCliOAuthConfig(oidcIssuerUrlFallback, oidcCliClientIdFallback).pipe(
+    Config.orElse(() =>
+      makeClerkCloudCliOAuthConfig(clerkPublishableKeyFallback, clerkCliOAuthClientIdFallback),
+    ),
+  );
+}
+
 export const cloudCliOAuthConfig = makeCloudCliOAuthConfig();
 
-export const hasCloudPublicConfig = Boolean(
-  (normalizeSecureRelayUrl(process.env.T3CODE_RELAY_URL ?? "") ?? buildTimeRelayUrl) &&
-  (process.env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() || buildTimeClerkPublishableKey) &&
-  (process.env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || buildTimeClerkCliOAuthClientId),
-);
+export function resolveHasCloudPublicConfig(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  fallback: {
+    readonly relayUrl?: string;
+    readonly clerkPublishableKey?: string;
+    readonly clerkCliOAuthClientId?: string;
+    readonly oidcIssuerUrl?: string;
+    readonly oidcCliClientId?: string;
+  } = {},
+): boolean {
+  const {
+    relayUrl = buildTimeRelayUrl,
+    clerkPublishableKey = buildTimeClerkPublishableKey,
+    clerkCliOAuthClientId = buildTimeClerkCliOAuthClientId,
+    oidcIssuerUrl = buildTimeOidcIssuerUrl,
+    oidcCliClientId = buildTimeOidcCliClientId,
+  } = fallback;
+  const hasRelayUrl = Boolean(normalizeSecureRelayUrl(env.T3CODE_RELAY_URL ?? "") ?? relayUrl);
+  const hasOidcCliConfig = Boolean(
+    (env.T3CODE_OIDC_ISSUER_URL?.trim() || oidcIssuerUrl) &&
+    (env.T3CODE_OIDC_CLI_CLIENT_ID?.trim() || oidcCliClientId),
+  );
+  const hasClerkCliConfig = Boolean(
+    (env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() || clerkPublishableKey) &&
+    (env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || clerkCliOAuthClientId),
+  );
+  return hasRelayUrl && (hasOidcCliConfig || hasClerkCliConfig);
+}
+
+export const hasCloudPublicConfig = resolveHasCloudPublicConfig();
