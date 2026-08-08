@@ -1,25 +1,11 @@
-import { remoteHttpClientLayer } from "@t3tools/client-runtime/rpc";
 import { buildConnectClerkAuthorizeUrl } from "@t3tools/shared/connectAuth";
-import {
-  discoverOidcConfiguration,
-  type OidcProviderMetadata,
-} from "@t3tools/shared/oidcDiscovery";
+import { type OidcProviderMetadata } from "@t3tools/shared/oidcDiscovery";
 import { useAtomValue } from "@effect/atom-react";
-import * as ManagedRuntime from "effect/ManagedRuntime";
 import { Atom } from "effect/unstable/reactivity";
 import { decodeJwt } from "jose";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { resolveOidcWebAuthConfig } from "./publicConfig";
-
-// A dedicated, minimal runtime rather than the app's `lib/runtime` singleton:
-// discovery only needs an HttpClient over fetch, and the app runtime also
-// wires up the relay client, WebSocket constructor, and OTLP tracing layers,
-// none of which a single discovery GET should depend on (or pay to build) to
-// resolve.
-const discoveryRuntime = ManagedRuntime.make(
-  remoteHttpClientLayer((input, init) => globalThis.fetch(input, init)),
-);
 
 const OIDC_SESSION_STORAGE_KEY = "t3code-oidc-session";
 const OIDC_PENDING_REQUEST_STORAGE_KEY = "t3code-oidc-pending-request";
@@ -182,15 +168,48 @@ export function hasDesktopOidcLoginBridge(): boolean {
 // re-fetched per sign-in attempt or token refresh.
 const discoveryCache = new Map<string, Promise<OidcProviderMetadata>>();
 
+// A plain browser fetch of the discovery document, not the Effect HttpClient:
+// that client injects a `traceparent` header, which turns this into a
+// preflighted cross-origin request that the issuer's CORS policy rejects. A
+// bare GET with no custom headers stays CORS-simple against any provider.
+async function fetchOidcMetadata(issuerUrl: string): Promise<OidcProviderMetadata> {
+  const normalizedIssuer = issuerUrl.replace(/\/+$/u, "");
+  const response = await fetch(`${normalizedIssuer}/.well-known/openid-configuration`);
+  if (!response.ok) {
+    throw new OidcAuthError(
+      `The OIDC discovery document request returned ${response.status}.`,
+      response.status,
+    );
+  }
+  const document = (await response.json()) as {
+    readonly issuer?: unknown;
+    readonly authorization_endpoint?: unknown;
+    readonly token_endpoint?: unknown;
+  };
+  if (
+    typeof document.issuer !== "string" ||
+    typeof document.authorization_endpoint !== "string" ||
+    typeof document.token_endpoint !== "string"
+  ) {
+    throw new OidcAuthError("The OIDC discovery document is missing required fields.");
+  }
+  if (document.issuer.replace(/\/+$/u, "") !== normalizedIssuer) {
+    throw new OidcAuthError("The OIDC discovery document issuer does not match the configuration.");
+  }
+  return {
+    issuer: document.issuer,
+    authorizationEndpoint: document.authorization_endpoint,
+    tokenEndpoint: document.token_endpoint,
+  };
+}
+
 export function discoverOidcMetadata(issuerUrl: string): Promise<OidcProviderMetadata> {
   const cached = discoveryCache.get(issuerUrl);
   if (cached) return cached;
-  const pending = discoveryRuntime
-    .runPromise(discoverOidcConfiguration(issuerUrl))
-    .catch((cause) => {
-      discoveryCache.delete(issuerUrl);
-      throw cause;
-    });
+  const pending = fetchOidcMetadata(issuerUrl).catch((cause) => {
+    discoveryCache.delete(issuerUrl);
+    throw cause;
+  });
   discoveryCache.set(issuerUrl, pending);
   return pending;
 }
