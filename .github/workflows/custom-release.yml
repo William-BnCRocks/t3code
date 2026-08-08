@@ -148,6 +148,13 @@ jobs:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
           T3CODE_DESKTOP_OUTPUT_DIR: release-publish
           T3CODE_DESKTOP_WSL_PREBUILD: ${{ github.workspace }}/wsl-prebuild/pty.node
+          # T3 Connect public config, baked into the bundle at build time. These
+          # are public identifiers (relay URL, OIDC issuer, PKCE client ids),
+          # not secrets; without them the installer omits all cloud UI.
+          T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
+          T3CODE_OIDC_ISSUER_URL: ${{ vars.T3CODE_OIDC_ISSUER_URL }}
+          T3CODE_OIDC_WEB_CLIENT_ID: ${{ vars.T3CODE_OIDC_WEB_CLIENT_ID }}
+          T3CODE_OIDC_CLI_CLIENT_ID: ${{ vars.T3CODE_OIDC_CLI_CLIENT_ID }}
         run: corepack pnpm run dist:desktop:win:x64
 
       - name: Create GitHub release
