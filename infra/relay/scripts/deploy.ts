@@ -443,7 +443,15 @@ const runRelayDeploy = Effect.fn("relay.deploy.run")(
         Layer.mergeAll(
           Layer.effect(
             AlchemyContext,
-            AlchemyContext.pipe(Effect.map((context) => ({ ...context, adopt: options.adopt }))),
+            AlchemyContext.pipe(
+              Effect.map((context) => ({
+                ...context,
+                adopt: options.adopt,
+                // --yes also consents to deploying/upgrading the Cloudflare
+                // state store, which otherwise dies in CI on first bootstrap.
+                updateStateStore: options.yes,
+              })),
+            ),
           ),
           Layer.succeed(AdoptPolicy, options.adopt),
           Layer.succeed(AuthProviders, {}),
