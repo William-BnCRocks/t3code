@@ -16,6 +16,8 @@ export class CloudPublicConfigMissingError extends Schema.TaggedErrorClass<Cloud
 export interface CloudPublicConfig {
   readonly clerkPublishableKey: string | null;
   readonly clerkJwtTemplate: string | null;
+  readonly oidcIssuerUrl: string | null;
+  readonly oidcWebClientId: string | null;
   readonly relayUrl: string | null;
   readonly relayTracing: {
     readonly tracesUrl: string | null;
@@ -23,6 +25,14 @@ export interface CloudPublicConfig {
     readonly tracesToken: string | null;
   };
 }
+
+/**
+ * Which cloud auth backend is active, derived entirely from build-time
+ * config. OIDC takes precedence when both are configured (e.g. a Clerk key
+ * left over from a previous deployment) so an operator can cut over by
+ * setting the OIDC vars alone.
+ */
+export type CloudAuthMode = "oidc" | "clerk" | null;
 
 export function trimNonEmpty(value: string | undefined): string | null {
   return value?.trim() || null;
@@ -37,12 +47,23 @@ function normalizeSecureUrl(value: string): string | null {
   }
 }
 
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/u, "");
+}
+
+function resolveOidcIssuerUrl(): string | null {
+  const raw = trimNonEmpty(import.meta.env.VITE_OIDC_ISSUER_URL as string | undefined);
+  return raw ? stripTrailingSlash(raw) : null;
+}
+
 export function resolveCloudPublicConfig(): CloudPublicConfig {
   return {
     clerkPublishableKey: trimNonEmpty(
       import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined,
     ),
     clerkJwtTemplate: trimNonEmpty(import.meta.env.VITE_CLERK_JWT_TEMPLATE as string | undefined),
+    oidcIssuerUrl: resolveOidcIssuerUrl(),
+    oidcWebClientId: trimNonEmpty(import.meta.env.VITE_OIDC_WEB_CLIENT_ID as string | undefined),
     relayUrl: normalizeSecureRelayUrl(
       (import.meta.env.VITE_T3CODE_RELAY_URL as string | undefined) ?? "",
     ),
@@ -69,9 +90,19 @@ export function resolveRelayTracingConfig() {
     : null;
 }
 
-export function hasCloudPublicConfig(): boolean {
+export function cloudAuthMode(): CloudAuthMode {
   const config = resolveCloudPublicConfig();
-  return Boolean(config.clerkPublishableKey && config.clerkJwtTemplate && config.relayUrl);
+  if (config.oidcIssuerUrl && config.oidcWebClientId && config.relayUrl) {
+    return "oidc";
+  }
+  if (config.clerkPublishableKey && config.clerkJwtTemplate && config.relayUrl) {
+    return "clerk";
+  }
+  return null;
+}
+
+export function hasCloudPublicConfig(): boolean {
+  return cloudAuthMode() !== null;
 }
 
 export function resolveRelayClerkTokenOptions() {
@@ -80,4 +111,14 @@ export function resolveRelayClerkTokenOptions() {
     throw new CloudPublicConfigMissingError({ key: "T3CODE_CLERK_JWT_TEMPLATE" });
   }
   return relayClerkTokenOptions(clerkJwtTemplate);
+}
+
+export function resolveOidcWebAuthConfig(): {
+  readonly issuerUrl: string;
+  readonly clientId: string;
+} | null {
+  const { oidcIssuerUrl, oidcWebClientId } = resolveCloudPublicConfig();
+  return oidcIssuerUrl && oidcWebClientId
+    ? { issuerUrl: oidcIssuerUrl, clientId: oidcWebClientId }
+    : null;
 }

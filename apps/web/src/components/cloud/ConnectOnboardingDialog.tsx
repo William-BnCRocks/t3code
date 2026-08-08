@@ -1,4 +1,3 @@
-import { useAuth } from "@clerk/react";
 import { AuthAdministrativeScopes, AuthRelayWriteScope } from "@t3tools/contracts";
 import { CheckIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -8,7 +7,7 @@ import {
   ConnectOnboardingOptOutSchema,
   EMPTY_CONNECT_ONBOARDING_OPT_OUT_STATE,
 } from "~/cloud/connectOnboarding";
-import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+import { useCloudAuth } from "~/cloud/managedAuth";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
 import { usePrimarySessionState } from "~/environments/primary";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -39,7 +38,8 @@ import { toastManager } from "../ui/toast";
  * away. A cold load with a restored session does not count as a sign-in.
  */
 export function ConnectOnboardingDialog() {
-  if (!hasCloudPublicConfig()) return null;
+  const cloudAuth = useCloudAuth();
+  if (cloudAuth.mode === null) return null;
 
   return <ConfiguredConnectOnboardingDialog />;
 }
@@ -47,9 +47,10 @@ export function ConnectOnboardingDialog() {
 type OnboardingStep = "publish" | "devices";
 
 function ConfiguredConnectOnboardingDialog() {
-  // Mirrors ManagedRelayAuthProvider: a pending Clerk session must not read as
-  // signed-out, or its later activation would look like a fresh sign-in.
-  const { isLoaded, isSignedIn, userId } = useAuth({ treatPendingAsSignedOut: false });
+  // useCloudAuth already applies ManagedRelayAuthProvider's semantics for
+  // Clerk (a pending session reads as signed-in, not signed-out) so its later
+  // activation does not look like a fresh sign-in here.
+  const { isLoaded, isSignedIn, userId } = useCloudAuth();
   const [optOutState, setOptOutState] = useLocalStorage(
     CONNECT_ONBOARDING_OPT_OUT_STORAGE_KEY,
     EMPTY_CONNECT_ONBOARDING_OPT_OUT_STATE,

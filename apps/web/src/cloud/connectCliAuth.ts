@@ -7,7 +7,13 @@ import {
 import { clerkFrontendApiUrlFromPublishableKey } from "@t3tools/shared/relayAuth";
 
 import { configuredHostedAppUrl, isHostedStaticApp } from "../hostedPairing";
-import { hasCloudPublicConfig, resolveCloudPublicConfig, trimNonEmpty } from "./publicConfig";
+import { discoverOidcMetadata } from "./oidcAuth";
+import {
+  cloudAuthMode,
+  hasCloudPublicConfig,
+  resolveCloudPublicConfig,
+  trimNonEmpty,
+} from "./publicConfig";
 
 const CONNECT_CLI_AUTH_STATE_STORAGE_KEY = "t3code-connect-cli-auth-state";
 
@@ -15,10 +21,21 @@ export function resolveConnectCliOAuthClientId(): string | null {
   return trimNonEmpty(import.meta.env.VITE_CLERK_CLI_OAUTH_CLIENT_ID as string | undefined);
 }
 
+export function resolveOidcCliClientId(): string | null {
+  return trimNonEmpty(import.meta.env.VITE_OIDC_CLI_CLIENT_ID as string | undefined);
+}
+
 export function hasConnectCliAuthConfig(): boolean {
-  return Boolean(
-    resolveCloudPublicConfig().clerkPublishableKey && resolveConnectCliOAuthClientId(),
-  );
+  const mode = cloudAuthMode();
+  if (mode === "oidc") {
+    return Boolean(resolveOidcCliClientId());
+  }
+  if (mode === "clerk") {
+    return Boolean(
+      resolveCloudPublicConfig().clerkPublishableKey && resolveConnectCliOAuthClientId(),
+    );
+  }
+  return false;
 }
 
 /**
@@ -43,6 +60,32 @@ export function buildConnectCliClerkAuthorizeUrl(request: ConnectAuthorizeReques
   }
   return buildConnectClerkAuthorizeUrl({
     authorizationEndpoint: `${clerkFrontendApiUrlFromPublishableKey(clerkPublishableKey)}/oauth/authorize`,
+    clientId,
+    redirectUri: connectCallbackUrl(configuredHostedAppUrl()),
+    scopes: CONNECT_OAUTH_SCOPES,
+    state: request.state,
+    challenge: request.challenge,
+  });
+}
+
+/**
+ * OIDC counterpart to `buildConnectCliClerkAuthorizeUrl`: the authorization
+ * endpoint comes from discovery instead of being derived from a publishable
+ * key, so this is async. The page acts on the CLI's behalf, requesting a code
+ * for the CLI's own client id against whatever browser session
+ * `useCloudAuth().signIn()` just established with the issuer.
+ */
+export async function buildConnectCliOidcAuthorizeUrl(
+  request: ConnectAuthorizeRequest,
+): Promise<string | null> {
+  const { oidcIssuerUrl } = resolveCloudPublicConfig();
+  const clientId = resolveOidcCliClientId();
+  if (!oidcIssuerUrl || !clientId) {
+    return null;
+  }
+  const metadata = await discoverOidcMetadata(oidcIssuerUrl);
+  return buildConnectClerkAuthorizeUrl({
+    authorizationEndpoint: metadata.authorizationEndpoint,
     clientId,
     redirectUri: connectCallbackUrl(configuredHostedAppUrl()),
     scopes: CONNECT_OAUTH_SCOPES,

@@ -12,8 +12,8 @@ import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 
 import { isElectron } from "./env";
-import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
-import { hasCloudPublicConfig } from "./cloud/publicConfig";
+import { ManagedRelayAuthProvider, OidcManagedRelayAuthProvider } from "./cloud/managedAuth";
+import { cloudAuthMode } from "./cloud/publicConfig";
 import { getRouter } from "./router";
 import {
   syncDocumentElectronPlatformClasses,
@@ -32,12 +32,19 @@ if (isElectron) {
 }
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
+const authMode = cloudAuthMode();
 
 const app = <AppRoot router={router} />;
 
+// Electron does not get an OIDC provider yet: the authorization-code redirect
+// leaves the app's window entirely, and generic providers cannot be assumed
+// to complete that round trip back into the desktop shell the way Clerk's
+// dedicated Electron transport does. Cloud sign-in stays unavailable there
+// (the same "no provider mounted" state as no cloud config at all) until a
+// deep-link-based flow exists.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    {clerkPublishableKey && hasCloudPublicConfig() ? (
+    {authMode === "clerk" && clerkPublishableKey ? (
       isElectron ? (
         <ElectronClerkProvider publishableKey={clerkPublishableKey} passkeys={passkeys}>
           <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
@@ -47,6 +54,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
         </ClerkProvider>
       )
+    ) : authMode === "oidc" && !isElectron ? (
+      <OidcManagedRelayAuthProvider>{app}</OidcManagedRelayAuthProvider>
     ) : (
       app
     )}

@@ -1,28 +1,42 @@
-import { UserButton, useAuth } from "@clerk/react";
-import { LogInIcon, SmartphoneIcon } from "lucide-react";
+import { UserButton } from "@clerk/react";
+import { LogInIcon, LogOutIcon, SmartphoneIcon } from "lucide-react";
 
-import { hasCloudPublicConfig } from "../../cloud/publicConfig";
+import { useCloudAuth } from "../../cloud/managedAuth";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
 import { MobileClientsUserProfilePage } from "./MobileClientsUserProfilePage";
 import { useT3ConnectAuthPrompt } from "./useT3ConnectAuthPrompt";
 
 export function T3ConnectSidebarSignIn() {
-  if (!hasCloudPublicConfig()) return null;
+  const cloudAuth = useCloudAuth();
+  const { authPrompt, openAuthPrompt } = useT3ConnectAuthPrompt();
 
-  return <ConfiguredT3ConnectSidebarSignIn />;
+  if (cloudAuth.mode === null || !cloudAuth.isLoaded || cloudAuth.isSignedIn) return null;
+
+  return (
+    <>
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton onClick={openAuthPrompt}>
+            <LogInIcon />
+            <span>Sign in to T3 Connect</span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      </SidebarMenu>
+      {authPrompt}
+    </>
+  );
 }
 
 export function T3ConnectSidebarAvatar() {
-  if (!hasCloudPublicConfig()) return null;
+  const cloudAuth = useCloudAuth();
 
-  return <ConfiguredT3ConnectSidebarAvatar />;
+  if (cloudAuth.mode === null || !cloudAuth.isLoaded || !cloudAuth.isSignedIn) return null;
+  if (cloudAuth.mode === "clerk") return <ClerkT3ConnectSidebarAvatar />;
+
+  return <OidcT3ConnectSidebarAvatar displayIdentity={cloudAuth.displayIdentity} />;
 }
 
-function ConfiguredT3ConnectSidebarAvatar() {
-  const { isLoaded, isSignedIn } = useAuth();
-
-  if (!isLoaded || !isSignedIn) return null;
-
+function ClerkT3ConnectSidebarAvatar() {
   return (
     <UserButton
       appearance={{
@@ -43,23 +57,27 @@ function ConfiguredT3ConnectSidebarAvatar() {
   );
 }
 
-function ConfiguredT3ConnectSidebarSignIn() {
-  const { isLoaded, isSignedIn } = useAuth();
-  const { authPrompt, openAuthPrompt } = useT3ConnectAuthPrompt();
-
-  if (!isLoaded || isSignedIn) return null;
+/**
+ * Generic-OIDC providers have no equivalent to Clerk's `<UserButton>` widget
+ * (and no analogue for its mobile-client device management), so signed-in
+ * state gets a plain identity row with a sign-out action instead — reusing
+ * the same sidebar menu button used for the signed-out prompt above.
+ */
+function OidcT3ConnectSidebarAvatar({
+  displayIdentity,
+}: {
+  readonly displayIdentity: string | null;
+}) {
+  const cloudAuth = useCloudAuth();
 
   return (
-    <>
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton onClick={openAuthPrompt}>
-            <LogInIcon />
-            <span>Sign in to T3 Connect</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-      {authPrompt}
-    </>
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton onClick={() => void cloudAuth.signOut()}>
+          <LogOutIcon />
+          <span className="truncate">{displayIdentity ?? "Signed in"}</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
   );
 }

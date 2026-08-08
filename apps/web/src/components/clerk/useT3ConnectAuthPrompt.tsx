@@ -1,12 +1,9 @@
-import { useClerk } from "@clerk/react";
-
-import { isElectron } from "../../env";
-import { resolveClerkSignInProps } from "./authRedirect";
+import { useCloudAuth } from "../../cloud/managedAuth";
 
 export function useT3ConnectAuthPrompt() {
-  const clerk = useClerk();
+  const cloudAuth = useCloudAuth();
   const openAuthPrompt = () => {
-    clerk.openSignIn(resolveClerkSignInProps(window.location.href, isElectron));
+    void cloudAuth.signIn(window.location.href);
   };
   return { authPrompt: null, openAuthPrompt };
 }
