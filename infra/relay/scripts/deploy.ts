@@ -93,24 +93,31 @@ export interface RelayDeployOptions {
 
 export interface RelayPublicConfig {
   readonly relayUrl: string;
-  readonly mobileTracingUrl: string;
-  readonly mobileTracingDataset: string;
-  readonly mobileTracingToken: string;
-  readonly clientTracingUrl: string;
-  readonly clientTracingDataset: string;
-  readonly clientTracingToken: string;
+  readonly mobileTracingUrl: string | undefined;
+  readonly mobileTracingDataset: string | undefined;
+  readonly mobileTracingToken: string | undefined;
+  readonly clientTracingUrl: string | undefined;
+  readonly clientTracingDataset: string | undefined;
+  readonly clientTracingToken: string | undefined;
 }
 
-const publicConfigEnvEntries = (config: RelayPublicConfig) =>
-  ({
-    T3CODE_RELAY_URL: config.relayUrl,
-    T3CODE_MOBILE_OTLP_TRACES_URL: config.mobileTracingUrl,
-    T3CODE_MOBILE_OTLP_TRACES_DATASET: config.mobileTracingDataset,
-    T3CODE_MOBILE_OTLP_TRACES_TOKEN: config.mobileTracingToken,
-    T3CODE_RELAY_CLIENT_OTLP_TRACES_URL: config.clientTracingUrl,
-    T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: config.clientTracingDataset,
-    T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: config.clientTracingToken,
-  }) as const;
+const publicConfigEnvEntries = (config: RelayPublicConfig): Readonly<Record<string, string>> => {
+  const entries: Record<string, string> = { T3CODE_RELAY_URL: config.relayUrl };
+  const optional: ReadonlyArray<readonly [string, string | undefined]> = [
+    ["T3CODE_MOBILE_OTLP_TRACES_URL", config.mobileTracingUrl],
+    ["T3CODE_MOBILE_OTLP_TRACES_DATASET", config.mobileTracingDataset],
+    ["T3CODE_MOBILE_OTLP_TRACES_TOKEN", config.mobileTracingToken],
+    ["T3CODE_RELAY_CLIENT_OTLP_TRACES_URL", config.clientTracingUrl],
+    ["T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET", config.clientTracingDataset],
+    ["T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN", config.clientTracingToken],
+  ];
+  for (const [name, value] of optional) {
+    if (value !== undefined) {
+      entries[name] = value;
+    }
+  }
+  return entries;
+};
 
 export function reconcileRootEnvPublicConfig(contents: string, config: RelayPublicConfig): string {
   let next = contents;
@@ -162,8 +169,11 @@ export interface RelayDeployOutcome {
   readonly publicConfig: Option.Option<RelayPublicConfig>;
 }
 
-export function serializeGithubOutput(entries: Readonly<Record<string, string | boolean>>): string {
+export function serializeGithubOutput(
+  entries: Readonly<Record<string, string | boolean | undefined>>,
+): string {
   return Object.entries(entries)
+    .filter(([, value]) => value !== undefined)
     .map(([key, value]) => `${key}=${value}\n`)
     .join("");
 }
@@ -251,7 +261,10 @@ const writeGithubEnvFile = Effect.fn("relay.deploy.writeGithubEnvFile")(function
     });
   }
   const fs = yield* FileSystem.FileSystem;
-  yield* Console.log(`::add-mask::${outcome.publicConfig.value.clientTracingToken}`);
+  const clientTracingToken = outcome.publicConfig.value.clientTracingToken;
+  if (clientTracingToken !== undefined) {
+    yield* Console.log(`::add-mask::${clientTracingToken}`);
+  }
   yield* fs.writeFileString(
     outputPath,
     serializeRelayClientTracingEnvironment(outcome.publicConfig.value),
@@ -308,22 +321,39 @@ function relayPublicConfigValues(
   };
 }
 
+// A stack deployed without Axiom credentials never produces tracing fields
+// (see RelayObservability); its output carries `tracingEnabled: false` so
+// their absence isn't treated as an incomplete deploy. Output that predates
+// this flag, or that explicitly reports tracing as enabled, still requires
+// every tracing field, matching the deploy's original all-or-nothing gate.
+function relayTracingEnabled(output: unknown): boolean {
+  if (typeof output !== "object" || output === null) {
+    return true;
+  }
+  return (output as Record<string, unknown>).tracingEnabled !== false;
+}
+
+function requiredRelayPublicConfigFields(output: unknown): ReadonlyArray<RelayDeployOutputField> {
+  return relayTracingEnabled(output) ? relayDeployOutputFields : ["url"];
+}
+
 export function missingRelayPublicConfigFields(
   output: unknown,
 ): ReadonlyArray<RelayDeployOutputField> {
   const values = relayPublicConfigValues(output);
-  return relayDeployOutputFields.filter((field) => values[field] === undefined);
+  return requiredRelayPublicConfigFields(output).filter((field) => values[field] === undefined);
 }
 
 function hasCompleteRelayPublicConfigValues(
+  output: unknown,
   values: Readonly<Record<RelayDeployOutputField, string | undefined>>,
-): values is Readonly<Record<RelayDeployOutputField, string>> {
-  return relayDeployOutputFields.every((field) => values[field] !== undefined);
+): values is Readonly<Record<RelayDeployOutputField, string | undefined>> & { url: string } {
+  return requiredRelayPublicConfigFields(output).every((field) => values[field] !== undefined);
 }
 
 export function publicConfigFromOutput(output: unknown): RelayPublicConfig | null {
   const values = relayPublicConfigValues(output);
-  if (!hasCompleteRelayPublicConfigValues(values)) {
+  if (!hasCompleteRelayPublicConfigValues(output, values)) {
     return null;
   }
   return {

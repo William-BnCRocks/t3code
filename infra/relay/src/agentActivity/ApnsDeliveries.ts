@@ -526,6 +526,22 @@ function staleJobResult(input: {
   };
 }
 
+const APNS_NOT_CONFIGURED_REASON = "APNs is not configured; delivery skipped.";
+
+function apnsNotConfiguredJobResult(input: {
+  readonly deviceId: string;
+  readonly kind: RelayDeliveryKind;
+}): RelayDeliveryResult {
+  return {
+    deviceId: input.deviceId,
+    kind: input.kind,
+    ok: true,
+    apnsStatus: null,
+    apnsReason: APNS_NOT_CONFIGURED_REASON,
+    apnsId: null,
+  };
+}
+
 function deliveryAttemptOutcome(result: Apns.ApnsDeliveryResult) {
   return {
     ...(result.status === 0 ? {} : { apnsStatus: result.status }),
@@ -584,9 +600,9 @@ interface LiveActivityDeliveryTarget {
 // DeviceTokenNotForTopic/BadDeviceToken, so per-device values override the
 // relay-wide defaults when present.
 function credentialsForTarget(
-  credentials: RelayConfiguration.RelayConfiguration["Service"]["apns"],
+  credentials: RelayConfiguration.ApnsCredentials,
   target: LiveActivityDeliveryTarget,
-): RelayConfiguration.RelayConfiguration["Service"]["apns"] {
+): RelayConfiguration.ApnsCredentials {
   return {
     ...credentials,
     ...(target.bundle_id ? { bundleId: target.bundle_id } : {}),
@@ -905,6 +921,32 @@ export const make = Effect.gen(function* () {
       }
       return staleJobResult({ deviceId: input.target.device_id, kind: input.kind });
     }
+    if (config.apns === undefined) {
+      yield* Effect.annotateCurrentSpan({
+        "relay.apns.delivery_skipped": "apns_not_configured",
+      });
+      const skipped = apnsNotConfiguredJobResult({
+        deviceId: input.target.device_id,
+        kind: input.kind,
+      });
+      if (input.sourceJobId) {
+        yield* attempts.completeSourceJob({
+          sourceJobId: input.sourceJobId,
+          apnsReason: APNS_NOT_CONFIGURED_REASON,
+        });
+      } else {
+        yield* attempts.record({
+          userId: input.target.user_id,
+          environmentId: null,
+          threadId: null,
+          deviceId: input.target.device_id,
+          kind: input.kind,
+          token: input.token,
+          apnsReason: APNS_NOT_CONFIGURED_REASON,
+        });
+      }
+      return skipped;
+    }
     const result = yield* apns
       .sendLiveActivityRequest({
         credentials: credentialsForTarget(config.apns, input.target),
@@ -1042,6 +1084,32 @@ export const make = Effect.gen(function* () {
           kind: "push_notification",
         });
       }
+    }
+    if (config.apns === undefined) {
+      yield* Effect.annotateCurrentSpan({
+        "relay.apns.delivery_skipped": "apns_not_configured",
+      });
+      const skipped = apnsNotConfiguredJobResult({
+        deviceId: input.target.device_id,
+        kind: "push_notification",
+      });
+      if (input.sourceJobId) {
+        yield* attempts.completeSourceJob({
+          sourceJobId: input.sourceJobId,
+          apnsReason: APNS_NOT_CONFIGURED_REASON,
+        });
+      } else {
+        yield* attempts.record({
+          userId: input.target.user_id,
+          environmentId: notification.environmentId,
+          threadId: notification.threadId,
+          deviceId: input.target.device_id,
+          kind: "push_notification",
+          token: input.token,
+          apnsReason: APNS_NOT_CONFIGURED_REASON,
+        });
+      }
+      return skipped;
     }
     const result = yield* apns
       .sendPushNotificationRequest({

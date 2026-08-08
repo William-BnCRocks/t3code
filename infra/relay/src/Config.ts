@@ -14,14 +14,21 @@ export interface ApnsCredentials {
   readonly environment: ApnsEnvironment;
 }
 
+export interface OidcConfiguration {
+  readonly issuerUrl: string;
+  readonly audiences: ReadonlyArray<string>;
+  readonly jwksUrl: string | undefined;
+}
+
 export class RelayConfiguration extends Context.Service<
   RelayConfiguration,
   {
     readonly relayIssuer: string;
-    readonly apns: ApnsCredentials;
-    readonly clerkSecretKey: Redacted.Redacted<string>;
-    readonly clerkPublishableKey: string;
-    readonly clerkJwtAudience: string;
+    readonly apns: ApnsCredentials | undefined;
+    readonly clerkSecretKey: Redacted.Redacted<string> | undefined;
+    readonly clerkPublishableKey: string | undefined;
+    readonly clerkJwtAudience: string | undefined;
+    readonly oidc: OidcConfiguration | undefined;
     readonly apnsDeliveryJobSigningSecret: Redacted.Redacted<string>;
     readonly cloudMintPrivateKey: Redacted.Redacted<string>;
     readonly cloudMintPublicKey: string;

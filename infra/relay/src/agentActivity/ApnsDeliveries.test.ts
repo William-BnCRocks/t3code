@@ -31,19 +31,22 @@ import * as ApnsDeliveries from "./ApnsDeliveries.ts";
 import * as ApnsClient from "./ApnsClient.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
 
+const apnsCredentials: RelayConfiguration.ApnsCredentials = {
+  environment: "sandbox",
+  teamId: "team-id",
+  keyId: "key-id",
+  privateKey: Redacted.make("not-a-private-key"),
+  bundleId: "com.t3tools.t3code.dev",
+};
+
 const config = RelayConfiguration.RelayConfiguration.of({
   relayIssuer: "https://relay.example.test",
-  apns: {
-    environment: "sandbox",
-    teamId: "team-id",
-    keyId: "key-id",
-    privateKey: Redacted.make("not-a-private-key"),
-    bundleId: "com.t3tools.t3code.dev",
-  },
+  apns: apnsCredentials,
   apnsDeliveryJobSigningSecret: Redacted.make("job-signing-secret"),
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",
+  oidc: undefined,
   cloudMintPrivateKey: Redacted.make("cloud-private-key"),
   cloudMintPublicKey: "cloud-public-key",
   managedEndpointBaseDomain: undefined,
@@ -59,7 +62,7 @@ const apnsSigningKeyPair = NodeCrypto.generateKeyPairSync("ec", {
 const signingConfig = RelayConfiguration.RelayConfiguration.of({
   ...config,
   apns: {
-    ...config.apns,
+    ...apnsCredentials,
     privateKey: Redacted.make(apnsSigningKeyPair.privateKey),
   },
 });
@@ -1616,6 +1619,80 @@ describe("ApnsDeliveries", () => {
       Effect.provide(makeLayer({ attempts, invalidatedTokens, config: signingConfig, execute })),
     );
   });
+
+  it.effect(
+    "resolves a queued delivery without contacting APNs when APNs is not configured",
+    () => {
+      const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+      let executeCount = 0;
+      const unconfiguredConfig = RelayConfiguration.RelayConfiguration.of({
+        ...config,
+        apns: undefined,
+      });
+      const payload = makeApnsDeliveryJobPayload({
+        kind: "push_notification",
+        userId: target.user_id,
+        deviceId: target.device_id,
+        token: "apns-device-token",
+        aggregate: null,
+        notification: {
+          title: "Thread",
+          body: "Input: Project",
+          environmentId: "env",
+          threadId: "thread",
+          deepLink: "/",
+        },
+        createdAt: "1970-01-01T00:00:00.000Z",
+        expiresAt: "1970-01-01T00:10:00.000Z",
+        jobId: "job-push-apns-not-configured",
+      });
+      const signed = signApnsDeliveryJob({
+        secret: unconfiguredConfig.apnsDeliveryJobSigningSecret,
+        payload,
+      });
+      const execute = (request: HttpClientRequest.HttpClientRequest) =>
+        Effect.sync(() => {
+          executeCount += 1;
+          return HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+        });
+
+      return Effect.gen(function* () {
+        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const result = yield* deliveries.processSignedJob(signed);
+
+        // No Apple credentials are configured; the job must resolve as a
+        // terminal no-op so the queue never retries or dead-letters it.
+        expect(result).toMatchObject({
+          kind: "push_notification",
+          ok: true,
+          apnsStatus: null,
+          apnsReason: "APNs is not configured; delivery skipped.",
+        });
+        expect(executeCount).toBe(0);
+        expect(attempts).toMatchObject([
+          {
+            kind: "push_notification",
+            sourceJobId: "job-push-apns-not-configured",
+            apnsReason: "APNs is not configured; delivery skipped.",
+          },
+        ]);
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            attempts,
+            currentTargets: [
+              {
+                ...target,
+                push_token: "apns-device-token",
+              },
+            ],
+            config: unconfiguredConfig,
+            execute,
+          }),
+        ),
+      );
+    },
+  );
 });
 
 describe("live activity alert decisions", () => {

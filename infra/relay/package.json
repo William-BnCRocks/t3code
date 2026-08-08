@@ -18,7 +18,8 @@
     "@t3tools/shared": "workspace:*",
     "alchemy": "2.0.0-beta.65",
     "drizzle-orm": "1.0.0-rc.4",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "jose": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260601.1",

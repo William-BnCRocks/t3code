@@ -1,5 +1,6 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import { sql as drizzleSql } from "drizzle-orm";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import * as Crypto from "effect/Crypto";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -243,7 +244,7 @@ export const relayClientAuthLayer = Layer.effect(
           Effect.tapError((error) =>
             Effect.annotateCurrentSpan(
               "relay.auth.clerk_verification_failure",
-              clerkVerificationFailureReason(error.cause),
+              authVerificationFailureReason(error.cause),
             ),
           ),
           Effect.catch(() => relayAuthInvalidError("invalid_bearer")),
@@ -703,7 +704,9 @@ export const tokenApi = HttpApiBuilder.group(
           scope: args.payload.scope,
         });
         yield* Effect.annotateCurrentSpan({
-          "relay.auth.mode": "clerk_bearer_token_exchange",
+          "relay.auth.mode": config.oidc
+            ? "oidc_bearer_token_exchange"
+            : "clerk_bearer_token_exchange",
           "relay.oauth.client_id": args.payload.client_id,
           "relay.oauth.scopes": args.payload.scope,
         });
@@ -711,12 +714,10 @@ export const tokenApi = HttpApiBuilder.group(
           return yield* new HttpApiError.Unauthorized({});
         }
 
-        const verified = yield* verifyClerkBearerToken(config, args.payload.subject_token).pipe(
-          Effect.catch(() => relayAuthInvalidError("invalid_bearer")),
-        );
-        if (!verified.sub || !hasExpectedClerkAudience(verified.aud, config.clerkJwtAudience)) {
-          return yield* relayAuthInvalidError("invalid_bearer");
-        }
+        const subjectUserId = yield* verifyDpopExchangeSubjectToken(
+          config,
+          args.payload.subject_token,
+        ).pipe(Effect.catch(() => relayAuthInvalidError("invalid_bearer")));
         const proofKeyThumbprint = yield* requireDpopProof().pipe(
           Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs),
         );
@@ -728,7 +729,7 @@ export const tokenApi = HttpApiBuilder.group(
         return {
           access_token: yield* relayTokens
             .issueDpopAccessToken({
-              userId: verified.sub,
+              userId: subjectUserId,
               proofKeyThumbprint,
               jti,
               issuedAtEpochSeconds: Math.floor(now.epochMilliseconds / 1_000),
@@ -996,6 +997,17 @@ class ClerkTokenVerificationFailed extends Schema.TaggedErrorClass<ClerkTokenVer
   }
 }
 
+class OidcTokenVerificationFailed extends Schema.TaggedErrorClass<OidcTokenVerificationFailed>()(
+  "OidcTokenVerificationFailed",
+  {
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return "OIDC token verification failed";
+  }
+}
+
 const isHttpUnauthorized = Schema.is(HttpApiError.Unauthorized);
 
 const currentTraceId = Effect.currentParentSpan.pipe(
@@ -1135,7 +1147,7 @@ function safeAuthFailureReason(value: string): string {
   return /^[a-z0-9._-]+$/i.test(value) ? value : "unknown";
 }
 
-function clerkVerificationFailureReason(cause: unknown): string {
+function authVerificationFailureReason(cause: unknown): string {
   if (
     cause instanceof Error &&
     (cause.message.startsWith("Invalid JWT audience claim ") ||
@@ -1147,6 +1159,12 @@ function clerkVerificationFailureReason(cause: unknown): string {
     const reason = (cause as { readonly reason?: unknown }).reason;
     if (typeof reason === "string" && reason.length > 0) {
       return safeAuthFailureReason(reason);
+    }
+  }
+  if (typeof cause === "object" && cause !== null && "code" in cause) {
+    const code = (cause as { readonly code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) {
+      return safeAuthFailureReason(code);
     }
   }
   if (cause instanceof Error && cause.name) {
@@ -1166,11 +1184,16 @@ function verifyClerkBearerToken(
   config: RelayConfiguration.RelayConfiguration["Service"],
   token: string,
 ) {
+  if (config.clerkSecretKey === undefined || config.clerkJwtAudience === undefined) {
+    return Effect.fail(new ClerkTokenVerificationFailed({ cause: "clerk_not_configured" }));
+  }
+  const clerkSecretKey = config.clerkSecretKey;
+  const clerkJwtAudience = config.clerkJwtAudience;
   return Effect.tryPromise({
     try: () =>
       verifyToken(token, {
-        secretKey: Redacted.value(config.clerkSecretKey),
-        audience: config.clerkJwtAudience,
+        secretKey: Redacted.value(clerkSecretKey),
+        audience: clerkJwtAudience,
       }),
     catch: (cause) => new ClerkTokenVerificationFailed({ cause }),
   }).pipe(
@@ -1184,11 +1207,16 @@ function verifyClerkOAuthBearerToken(
   config: RelayConfiguration.RelayConfiguration["Service"],
   token: string,
 ) {
+  if (config.clerkSecretKey === undefined || config.clerkPublishableKey === undefined) {
+    return Effect.fail(new ClerkTokenVerificationFailed({ cause: "clerk_not_configured" }));
+  }
+  const clerkSecretKey = config.clerkSecretKey;
+  const clerkPublishableKey = config.clerkPublishableKey;
   return Effect.tryPromise({
     try: async () => {
       const client = createClerkClient({
-        secretKey: Redacted.value(config.clerkSecretKey),
-        publishableKey: config.clerkPublishableKey,
+        secretKey: Redacted.value(clerkSecretKey),
+        publishableKey: clerkPublishableKey,
       });
       const state = await client.authenticateRequest(
         new Request(config.relayIssuer, {
@@ -1206,13 +1234,84 @@ function verifyClerkOAuthBearerToken(
   });
 }
 
+const oidcRemoteJwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+const oidcJwksDiscoveryCache = new Map<string, Promise<string>>();
+
+function remoteJwksForUrl(jwksUrl: string) {
+  const cached = oidcRemoteJwksCache.get(jwksUrl);
+  if (cached) {
+    return cached;
+  }
+  const jwks = createRemoteJWKSet(new URL(jwksUrl));
+  oidcRemoteJwksCache.set(jwksUrl, jwks);
+  return jwks;
+}
+
+function discoverOidcJwksUri(issuerUrl: string): Promise<string> {
+  const cached = oidcJwksDiscoveryCache.get(issuerUrl);
+  if (cached) {
+    return cached;
+  }
+  const discovery = (async () => {
+    // @effect-diagnostics-next-line globalFetch:off - jose's own JWKS fetching uses the global fetch; mirror that here for discovery.
+    const response = await fetch(`${issuerUrl}/.well-known/openid-configuration`);
+    if (!response.ok) {
+      throw new Error(`OIDC discovery document request failed with status ${response.status}`);
+    }
+    const document = (await response.json()) as { readonly jwks_uri?: unknown };
+    if (typeof document.jwks_uri !== "string" || document.jwks_uri.length === 0) {
+      throw new Error("OIDC discovery document is missing jwks_uri");
+    }
+    return document.jwks_uri;
+  })();
+  // A later request should be able to retry discovery after a transient failure.
+  discovery.catch(() => oidcJwksDiscoveryCache.delete(issuerUrl));
+  oidcJwksDiscoveryCache.set(issuerUrl, discovery);
+  return discovery;
+}
+
+async function resolveOidcJwks(oidc: RelayConfiguration.OidcConfiguration) {
+  const jwksUrl = oidc.jwksUrl ?? (await discoverOidcJwksUri(oidc.issuerUrl));
+  return remoteJwksForUrl(jwksUrl);
+}
+
+function verifyOidcBearerToken(oidc: RelayConfiguration.OidcConfiguration, token: string) {
+  return Effect.tryPromise({
+    try: async () => {
+      const jwks = await resolveOidcJwks(oidc);
+      const { payload } = await jwtVerify(token, jwks, {
+        // Tolerate the common trailing-slash mismatch between issuer configuration and token claim.
+        issuer: [oidc.issuerUrl, `${oidc.issuerUrl}/`],
+        audience: [...oidc.audiences],
+      });
+      if (typeof payload.sub !== "string" || payload.sub.length === 0) {
+        throw new Error("OIDC token is missing a subject claim");
+      }
+      return { sub: payload.sub };
+    },
+    catch: (cause) => new OidcTokenVerificationFailed({ cause }),
+  }).pipe(
+    Effect.withSpan("verify_oidc_bearer_token", {
+      attributes: { "relay.auth.token_length": token.length },
+    }),
+  );
+}
+
 export function verifyRelayClientBearerToken(
   config: RelayConfiguration.RelayConfiguration["Service"],
   token: string,
-) {
-  return verifyClerkBearerToken(config, token).pipe(
+): Effect.Effect<
+  {
+    readonly sub: string;
+    readonly mode: "clerk_session_bearer" | "clerk_oauth_bearer" | "oidc_bearer";
+  },
+  ClerkTokenVerificationFailed | OidcTokenVerificationFailed
+> {
+  const clerkVerification = verifyClerkBearerToken(config, token).pipe(
     Effect.flatMap((verified) =>
-      verified.sub && hasExpectedClerkAudience(verified.aud, config.clerkJwtAudience)
+      verified.sub &&
+      config.clerkJwtAudience !== undefined &&
+      hasExpectedClerkAudience(verified.aud, config.clerkJwtAudience)
         ? Effect.succeed({ sub: verified.sub, mode: "clerk_session_bearer" as const })
         : Effect.fail(new ClerkTokenVerificationFailed({ cause: "missing_relay_audience" })),
     ),
@@ -1222,6 +1321,38 @@ export function verifyRelayClientBearerToken(
       ),
     ),
   );
+
+  if (!config.oidc) {
+    return clerkVerification;
+  }
+  const oidcVerification = verifyOidcBearerToken(config.oidc, token).pipe(
+    Effect.map((verified) => ({ sub: verified.sub, mode: "oidc_bearer" as const })),
+  );
+  // Only fall back to Clerk when it is actually configured, so an OIDC-only
+  // deployment surfaces the real OIDC failure reason instead of clerk_not_configured.
+  return config.clerkSecretKey === undefined
+    ? oidcVerification
+    : oidcVerification.pipe(Effect.catch(() => clerkVerification));
+}
+
+// The DPoP token-exchange subject token is a Clerk session JWT (or, when
+// configured, an OIDC token) rather than a Clerk OAuth bearer token, so this
+// does not fall back to `verifyClerkOAuthBearerToken`.
+export function verifyDpopExchangeSubjectToken(
+  config: RelayConfiguration.RelayConfiguration["Service"],
+  subjectToken: string,
+): Effect.Effect<string, ClerkTokenVerificationFailed | OidcTokenVerificationFailed> {
+  return config.oidc
+    ? verifyOidcBearerToken(config.oidc, subjectToken).pipe(Effect.map((verified) => verified.sub))
+    : verifyClerkBearerToken(config, subjectToken).pipe(
+        Effect.flatMap((verified) =>
+          verified.sub &&
+          config.clerkJwtAudience !== undefined &&
+          hasExpectedClerkAudience(verified.aud, config.clerkJwtAudience)
+            ? Effect.succeed(verified.sub)
+            : Effect.fail(new ClerkTokenVerificationFailed({ cause: "missing_relay_audience" })),
+        ),
+      );
 }
 
 const requireDpopPrincipalScope = Effect.fn("relay.api.require_dpop_principal_scope")(function* (

@@ -124,14 +124,12 @@ The repository must define these Actions variables shared by relay deployments:
 
 - `CLOUDFLARE_ACCOUNT_ID`
 - `PLANETSCALE_ORGANIZATION`
-- `AXIOM_ORG_ID`
 
 The repository must define these Actions secrets shared by relay deployments:
 
 - `CLOUDFLARE_API_TOKEN`
 - `PLANETSCALE_API_TOKEN_ID`
 - `PLANETSCALE_API_TOKEN`
-- `AXIOM_TOKEN`
 
 The `production` GitHub environment must define these Actions variables:
 
@@ -141,19 +139,40 @@ The `production` GitHub environment must define these Actions variables:
 - `CLERK_PUBLISHABLE_KEY`
 - `CLERK_JWT_AUDIENCE`
 - `CLERK_JWT_TEMPLATE`
-- `APNS_ENVIRONMENT`
-- `APNS_TEAM_ID`
-- `APNS_KEY_ID`
-- `APNS_BUNDLE_ID`
 
 The `production` GitHub environment must define these Actions secrets:
 
 - `CLERK_SECRET_KEY`
-- `APNS_PRIVATE_KEY`
+
+A self-hosted relay can trust an OIDC provider such as any standard OIDC-compliant IdP instead of
+Clerk. `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, and `CLERK_JWT_AUDIENCE` are required only when
+OIDC is not configured, and vice versa; at least one of the two must be fully configured. Set
+these variables to enable OIDC:
+
+- `OIDC_ISSUER_URL`, the OIDC provider's issuer URL.
+- `OIDC_AUDIENCES`, a comma-separated list of accepted token audiences.
+- `OIDC_JWKS_URL`, optional; overrides the JWKS location otherwise discovered from the issuer's
+  well-known configuration document.
+
+Apple Push Notification service (APNs) credentials are optional: required only for mobile push
+notifications and Live Activities, the relay runs without them and skips push delivery until they
+are added. These variables are all-or-nothing — set every one of them, or leave every one unset:
+
+- `APNS_ENVIRONMENT`
+- `APNS_TEAM_ID`
+- `APNS_KEY_ID`
+- `APNS_BUNDLE_ID`
+- `APNS_PRIVATE_KEY` (secret)
+
+Axiom request tracing is optional: required only for request tracing, the relay deploys and runs
+without it and skips creating tracing resources and exporting spans until it is added. Set
+`AXIOM_TOKEN` (secret) to enable it; `AXIOM_ORG_ID` is required only alongside a personal access
+token, and otherwise unnecessary — a lone `AXIOM_ORG_ID` without `AXIOM_TOKEN` fails the deploy with
+a clear error rather than silently doing nothing.
 
 The account-scoped repository credentials are consumed by Alchemy while provisioning relay stages; they
 are not bound into the relay Worker. The production deployment uses an Axiom personal access token,
-so `AXIOM_ORG_ID` must accompany `AXIOM_TOKEN`. The release workflow reads the production relay's
+so `AXIOM_ORG_ID` accompanies `AXIOM_TOKEN`. The release workflow reads the production relay's
 derived public URL and Clerk publishable key from the same environment for downstream desktop, CLI,
 and hosted web builds.
 

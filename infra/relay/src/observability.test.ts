@@ -1,7 +1,8 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as HttpServer from "effect/unstable/http/HttpServer";
@@ -10,7 +11,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import type { OtlpTracer } from "effect/unstable/observability";
 
 import * as EnvironmentConnector from "./environments/EnvironmentConnector.ts";
-import { makeRelayTraceLayer } from "./observability.ts";
+import { makeRelayTraceLayer, resolveAxiomConfig } from "./observability.ts";
 
 interface ExportedRequest {
   readonly authorization: string | undefined;
@@ -83,3 +84,34 @@ it.effect("exports schema error fields as span attributes", () =>
     });
   }).pipe(Effect.provide(NodeHttpServer.layerTest), Effect.scoped),
 );
+
+describe("resolveAxiomConfig", () => {
+  it("disables tracing when neither variable is set", () => {
+    expect(resolveAxiomConfig({ token: Option.none(), orgId: Option.none() })).toEqual({
+      ok: true,
+      enabled: false,
+    });
+  });
+
+  it("enables tracing when only AXIOM_TOKEN is set", () => {
+    expect(
+      resolveAxiomConfig({ token: Option.some(Redacted.make("token")), orgId: Option.none() }),
+    ).toEqual({ ok: true, enabled: true });
+  });
+
+  it("enables tracing when AXIOM_TOKEN and AXIOM_ORG_ID are both set", () => {
+    expect(
+      resolveAxiomConfig({
+        token: Option.some(Redacted.make("token")),
+        orgId: Option.some("org-id"),
+      }),
+    ).toEqual({ ok: true, enabled: true });
+  });
+
+  it("fails startup when AXIOM_ORG_ID is set without AXIOM_TOKEN", () => {
+    expect(resolveAxiomConfig({ token: Option.none(), orgId: Option.some("org-id") })).toEqual({
+      ok: false,
+      message: "Relay Axiom configuration is incomplete; missing AXIOM_TOKEN.",
+    });
+  });
+});

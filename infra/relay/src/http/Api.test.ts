@@ -1,6 +1,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -15,10 +16,11 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { EnvironmentId } from "@t3tools/contracts";
-import { RelayEnvironmentAuth } from "@t3tools/contracts/relay";
+import { RelayClientAuth, RelayEnvironmentAuth } from "@t3tools/contracts/relay";
 
 import {
   RELAY_REQUEST_DEADLINE_MS,
+  relayClientAuthLayer,
   relayCors,
   relayDocsRedirectRoute,
   relayEnvironmentAuthLayer,
@@ -26,6 +28,7 @@ import {
   revokeEnvironmentLinkRecord,
   traceRelayHttpRequestWith,
   unlinkEnvironmentRecord,
+  verifyDpopExchangeSubjectToken,
   verifyRelayClientBearerToken,
   withoutCapturedParentSpan,
 } from "./Api.ts";
@@ -52,6 +55,7 @@ const relaySettings: RelayConfiguration.RelayConfiguration["Service"] = {
   clerkSecretKey: Redacted.make("clerk-secret-key"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",
+  oidc: undefined,
   apnsDeliveryJobSigningSecret: Redacted.make("apns-delivery-secret"),
   cloudMintPrivateKey: Redacted.make("cloud-mint-private-key"),
   cloudMintPublicKey: "cloud-mint-public-key",
@@ -111,6 +115,162 @@ describe("relay client authentication", () => {
           vi.mocked(createClerkClient).mockReset();
         }),
       ),
+    ),
+  );
+});
+
+const oidcIssuer = "https://issuer.example.test";
+const oidcAudience = "relay-oidc-audience";
+const oidcJwksUrl = "https://issuer.example.test/.well-known/jwks.json";
+const oidcKeyId = "test-oidc-key";
+const oidcKeyPairPromise = generateKeyPair("ES256", { extractable: true });
+
+async function oidcPublicJwk() {
+  const { publicKey } = await oidcKeyPairPromise;
+  return { ...(await exportJWK(publicKey)), kid: oidcKeyId, alg: "ES256", use: "sig" };
+}
+
+async function signOidcToken(
+  overrides: {
+    readonly issuer?: string;
+    readonly audience?: string;
+    readonly subject?: string | null;
+    readonly expiresAt?: string | number;
+  } = {},
+): Promise<string> {
+  const { privateKey } = await oidcKeyPairPromise;
+  const jwt = new SignJWT({})
+    .setProtectedHeader({ alg: "ES256", kid: oidcKeyId })
+    .setIssuedAt()
+    .setIssuer(overrides.issuer ?? oidcIssuer)
+    .setAudience(overrides.audience ?? oidcAudience)
+    .setExpirationTime(overrides.expiresAt ?? "5m");
+  if (overrides.subject !== null) {
+    jwt.setSubject(overrides.subject ?? "user-oidc");
+  }
+  return jwt.sign(privateKey);
+}
+
+function withStubbedOidcJwks<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
+  return Effect.gen(function* () {
+    const originalFetch = globalThis.fetch;
+    const jwk = yield* Effect.promise(() => oidcPublicJwk());
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === oidcJwksUrl) {
+        return new Response(JSON.stringify({ keys: [jwk] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    }) as typeof fetch;
+    return yield* effect.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          globalThis.fetch = originalFetch;
+        }),
+      ),
+    );
+  });
+}
+
+const oidcSettings: RelayConfiguration.RelayConfiguration["Service"] = {
+  ...relaySettings,
+  clerkSecretKey: undefined,
+  clerkPublishableKey: undefined,
+  clerkJwtAudience: undefined,
+  oidc: {
+    issuerUrl: oidcIssuer,
+    audiences: [oidcAudience],
+    jwksUrl: oidcJwksUrl,
+  },
+};
+
+describe("relay OIDC bearer authentication", () => {
+  it.effect("authenticates a valid OIDC bearer token", () =>
+    withStubbedOidcJwks(
+      Effect.gen(function* () {
+        const token = yield* Effect.promise(() => signOidcToken());
+        expect(yield* verifyRelayClientBearerToken(oidcSettings, token)).toEqual({
+          sub: "user-oidc",
+          mode: "oidc_bearer",
+        });
+      }),
+    ),
+  );
+
+  it.effect("maps an OIDC audience mismatch to an auth_invalid response", () =>
+    withStubbedOidcJwks(
+      Effect.gen(function* () {
+        const token = yield* Effect.promise(() => signOidcToken({ audience: "other-audience" }));
+        const auth = yield* RelayClientAuth;
+        const error = yield* Effect.flip(
+          auth.clientBearer(Effect.succeed(HttpServerResponse.empty()), {
+            credential: Redacted.make(token),
+            endpoint: {} as never,
+            group: {} as never,
+          }),
+        );
+
+        expect(Predicate.isTagged(error, "RelayAuthInvalidError")).toBe(true);
+        if (Predicate.isTagged(error, "RelayAuthInvalidError")) {
+          expect(error.reason).toBe("invalid_bearer");
+        }
+      }).pipe(
+        Effect.provideService(
+          HttpServerRequest.HttpServerRequest,
+          HttpServerRequest.fromWeb(new Request("https://relay.test/v1/client/environments")),
+        ),
+        Effect.provideService(HttpServerRequest.ParsedSearchParams, {}),
+        Effect.provideService(HttpRouter.RouteContext, { params: {}, route: {} as never }),
+        Effect.provide(
+          relayClientAuthLayer.pipe(
+            Layer.provide(Layer.succeed(RelayConfiguration.RelayConfiguration, oidcSettings)),
+          ),
+        ),
+        Effect.scoped,
+      ),
+    ),
+  );
+
+  it.effect("rejects an OIDC token issued by an unexpected issuer", () =>
+    withStubbedOidcJwks(
+      Effect.gen(function* () {
+        const token = yield* Effect.promise(() =>
+          signOidcToken({ issuer: "https://wrong-issuer.example.test" }),
+        );
+        yield* Effect.flip(verifyRelayClientBearerToken(oidcSettings, token));
+      }),
+    ),
+  );
+
+  it.effect("rejects an expired OIDC token", () => {
+    // @effect-diagnostics-next-line globalDate:off - fixed reference point for a token signed outside the Effect runtime.
+    const expiresAt = Math.floor(Date.now() / 1_000) - 60;
+    return withStubbedOidcJwks(
+      Effect.gen(function* () {
+        const token = yield* Effect.promise(() => signOidcToken({ expiresAt }));
+        yield* Effect.flip(verifyRelayClientBearerToken(oidcSettings, token));
+      }),
+    );
+  });
+
+  it.effect("rejects an OIDC token without a subject claim", () =>
+    withStubbedOidcJwks(
+      Effect.gen(function* () {
+        const token = yield* Effect.promise(() => signOidcToken({ subject: null }));
+        yield* Effect.flip(verifyRelayClientBearerToken(oidcSettings, token));
+      }),
+    ),
+  );
+
+  it.effect("verifies a DPoP token-exchange subject_token via OIDC", () =>
+    withStubbedOidcJwks(
+      Effect.gen(function* () {
+        const token = yield* Effect.promise(() => signOidcToken());
+        expect(yield* verifyDpopExchangeSubjectToken(oidcSettings, token)).toBe("user-oidc");
+      }),
     ),
   );
 });

@@ -2,6 +2,7 @@ import * as Alchemy from "alchemy";
 import * as Axiom from "alchemy/Axiom";
 import * as Output from "alchemy/Output";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -12,6 +13,28 @@ import * as Tracer from "effect/Tracer";
 import { OtlpExporter, OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 
 import { relayResourceNameForStage } from "./deploymentConfig.ts";
+
+export type ResolvedAxiomConfig =
+  | { readonly ok: true; readonly enabled: boolean }
+  | { readonly ok: false; readonly message: string };
+
+// Axiom request tracing is optional so a self-hosted relay can deploy and run
+// without an Axiom account. Alchemy's Axiom provider treats AXIOM_TOKEN alone
+// as an org-scoped API token and AXIOM_TOKEN with AXIOM_ORG_ID as a personal
+// access token, so a lone AXIOM_ORG_ID is a missed AXIOM_TOKEN rather than a
+// valid configuration.
+export function resolveAxiomConfig(input: {
+  readonly token: Option.Option<Redacted.Redacted<string>>;
+  readonly orgId: Option.Option<string>;
+}): ResolvedAxiomConfig {
+  if (Option.isSome(input.token)) {
+    return { ok: true, enabled: true };
+  }
+  if (Option.isSome(input.orgId)) {
+    return { ok: false, message: "Relay Axiom configuration is incomplete; missing AXIOM_TOKEN." };
+  }
+  return { ok: true, enabled: false };
+}
 
 const relayRecentSpansQuery = (dataset: string) =>
   [
@@ -25,6 +48,16 @@ const relayRecentSpansQuery = (dataset: string) =>
   ].join("\n");
 
 export const RelayObservability = Effect.gen(function* () {
+  const axiomToken = yield* Config.redacted("AXIOM_TOKEN").pipe(Config.option);
+  const axiomOrgId = yield* Config.string("AXIOM_ORG_ID").pipe(Config.option);
+  const axiomConfig = resolveAxiomConfig({ token: axiomToken, orgId: axiomOrgId });
+  if (!axiomConfig.ok) {
+    return yield* Effect.die(new Error(axiomConfig.message));
+  }
+  if (!axiomConfig.enabled) {
+    return { enabled: false } as const;
+  }
+
   const { stage } = yield* Alchemy.Stack;
   const traces = yield* Axiom.Dataset("RelayTracesDataset", {
     name: relayResourceNameForStage("t3-code-relay-traces", stage),
@@ -65,7 +98,13 @@ export const RelayObservability = Effect.gen(function* () {
     aplQuery: Output.map(traces.name, relayRecentSpansQuery),
   });
 
-  return { traces, workerIngestToken, mobileIngestToken, clientIngestToken } as const;
+  return {
+    enabled: true,
+    traces,
+    workerIngestToken,
+    mobileIngestToken,
+    clientIngestToken,
+  } as const;
 });
 
 export const withSpanAttributes =

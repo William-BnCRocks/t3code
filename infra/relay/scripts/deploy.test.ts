@@ -244,4 +244,52 @@ describe("publicConfigFromOutput", () => {
   it("rejects incomplete stack output", () => {
     expect(publicConfigFromOutput({ url: "https://relay.example.test" })).toBeNull();
   });
+
+  it("accepts a relay URL alone when the deploy reports tracing disabled", () => {
+    expect(
+      publicConfigFromOutput({
+        url: "https://relay.example.test",
+        tracingEnabled: false,
+      }),
+    ).toEqual({
+      relayUrl: "https://relay.example.test",
+      mobileTracingUrl: undefined,
+      mobileTracingDataset: undefined,
+      mobileTracingToken: undefined,
+      clientTracingUrl: undefined,
+      clientTracingDataset: undefined,
+      clientTracingToken: undefined,
+    });
+  });
+
+  it("still requires the relay URL when tracing is disabled", () => {
+    expect(publicConfigFromOutput({ tracingEnabled: false })).toBeNull();
+  });
+});
+
+describe("missingRelayPublicConfigFields with tracing disabled", () => {
+  it("does not report tracing fields as missing", () => {
+    expect(
+      missingRelayPublicConfigFields({
+        url: "https://relay.example.test",
+        tracingEnabled: false,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("reconcileRootEnvPublicConfig with tracing disabled", () => {
+  it("omits, rather than blanks, the tracing env entries", () => {
+    expect(
+      reconcileRootEnvPublicConfig("", {
+        relayUrl: "https://relay.example.test",
+        mobileTracingUrl: undefined,
+        mobileTracingDataset: undefined,
+        mobileTracingToken: undefined,
+        clientTracingUrl: undefined,
+        clientTracingDataset: undefined,
+        clientTracingToken: undefined,
+      }),
+    ).toBe("T3CODE_RELAY_URL=https://relay.example.test\n");
+  });
 });

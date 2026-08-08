@@ -5,6 +5,7 @@ import * as Planetscale from "alchemy/Planetscale";
 import * as Alchemy from "alchemy";
 import * as RemovalPolicy from "alchemy/RemovalPolicy";
 import type { EffectPgDatabase } from "drizzle-orm/effect-postgres";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -44,15 +45,24 @@ export const PlanetscaleDatabase = Effect.gen(function* () {
   });
 
   const mode = relayDatabaseMode(stage);
+  // Deploy-time overrides so self-hosted stages can request a smaller
+  // PlanetScale footprint than the checked-in defaults.
+  const clusterSize = yield* Config.string("RELAY_DATABASE_CLUSTER_SIZE").pipe(
+    Config.withDefault("PS_20"),
+  );
+  const regionSlug = yield* Config.string("RELAY_DATABASE_REGION").pipe(
+    Config.withDefault("us-west"),
+  );
+  const replicas = yield* Config.int("RELAY_DATABASE_REPLICAS").pipe(Config.withDefault(2));
   const database =
     mode === "shared-database"
       ? yield* Planetscale.PostgresDatabase("RelayPostgresDatabase", {
           name: "t3coderelay",
-          region: { slug: "us-west" },
-          clusterSize: "PS_20",
+          region: { slug: regionSlug },
+          clusterSize,
           migrationsDir: schema.out,
           migrationsTable: "relay_migrations",
-          replicas: 2,
+          ...(replicas > 0 ? { replicas } : {}),
         }).pipe(RemovalPolicy.retain())
       : yield* Planetscale.PostgresDatabase.ref("RelayPostgresDatabase", {
           stage: "prod",
