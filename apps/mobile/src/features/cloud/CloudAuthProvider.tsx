@@ -1,5 +1,6 @@
 import { ClerkProvider, useAuth } from "@clerk/expo";
 import { tokenCache } from "@clerk/expo/token-cache";
+import { useAtomValue } from "@effect/atom-react";
 import { ManagedRelay, setManagedRelaySession } from "@t3tools/client-runtime/relay";
 import {
   reportAtomCommandResult,
@@ -7,7 +8,7 @@ import {
   settlePromise,
 } from "@t3tools/client-runtime/state/runtime";
 import * as Effect from "effect/Effect";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useCallback, useEffect, useRef } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
 import { runtime } from "../../lib/runtime";
@@ -19,7 +20,12 @@ import {
   unregisterAgentAwarenessDeviceForCurrentUser,
 } from "../agent-awareness/remoteRegistration";
 import { clearConnectOnboardingRequest, requestConnectOnboarding } from "./connectOnboarding";
-import { resolveCloudPublicConfig, resolveRelayClerkTokenOptions } from "./publicConfig";
+import { ensureOidcSessionInitialized, getOidcAccessToken, oidcSessionAtom } from "./oidcSession";
+import {
+  cloudAuthMode,
+  resolveCloudPublicConfig,
+  resolveRelayClerkTokenOptions,
+} from "./publicConfig";
 
 function resetManagedRelayTokenCache() {
   return settleAsyncResult(() =>
@@ -45,8 +51,20 @@ export function activateCloudRelayAccount(
   });
 }
 
-function CloudAuthBridge(props: { readonly children: ReactNode }) {
-  const { getToken, isLoaded, isSignedIn, userId } = useAuth({ treatPendingAsSignedOut: false });
+interface CloudAuthBridgeProps {
+  readonly children: ReactNode;
+  readonly isLoaded: boolean;
+  readonly isSignedIn: boolean;
+  readonly userId: string | null;
+  readonly getToken: () => Promise<string | null>;
+}
+
+// Account-switch semantics (reset the relay token cache, drop this device's
+// saved relay environments, unregister the previous account's push device)
+// must hold no matter which auth provider is active, so both Clerk and OIDC
+// route through this bridge rather than duplicating the effect below.
+function CloudAuthBridge(props: CloudAuthBridgeProps) {
+  const { getToken, isLoaded, isSignedIn, userId } = props;
   const removeRelayEnvironments = useAtomCommand(environmentCatalog.removeRelayEnvironments, {
     reportFailure: false,
     reportDefect: false,
@@ -121,7 +139,7 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
     }
 
     const previous = previousTokenProviderRef.current;
-    const tokenProvider = () => getToken(resolveRelayClerkTokenOptions());
+    const tokenProvider = getToken;
     const activateSession = () => {
       if (cancelled) {
         return;
@@ -173,24 +191,64 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
   return props.children;
 }
 
-export function CloudAuthProvider(props: { readonly children: ReactNode }) {
-  const config = resolveCloudPublicConfig();
-  const publishableKey = config.clerk.publishableKey;
-  const relayUrl = config.relay.url;
-
-  useEffect(() => {
-    if (!publishableKey || !relayUrl) {
-      deactivateCloudRelayAccount();
-    }
-  }, [publishableKey, relayUrl]);
-
-  if (!publishableKey || !relayUrl) {
-    return props.children;
-  }
+function ClerkCloudAuthBridge(props: { readonly children: ReactNode }) {
+  const { getToken, isLoaded, isSignedIn, userId } = useAuth({ treatPendingAsSignedOut: false });
+  const relayGetToken = useCallback(() => getToken(resolveRelayClerkTokenOptions()), [getToken]);
 
   return (
-    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-      <CloudAuthBridge>{props.children}</CloudAuthBridge>
-    </ClerkProvider>
+    <CloudAuthBridge
+      isLoaded={isLoaded}
+      isSignedIn={Boolean(isSignedIn)}
+      userId={userId ?? null}
+      getToken={relayGetToken}
+    >
+      {props.children}
+    </CloudAuthBridge>
   );
+}
+
+function OidcCloudAuthBridge(props: { readonly children: ReactNode }) {
+  useEffect(() => {
+    void ensureOidcSessionInitialized();
+  }, []);
+  const session = useAtomValue(oidcSessionAtom);
+
+  return (
+    <CloudAuthBridge
+      isLoaded={session.isLoaded}
+      isSignedIn={session.isSignedIn}
+      userId={session.userId}
+      getToken={getOidcAccessToken}
+    >
+      {props.children}
+    </CloudAuthBridge>
+  );
+}
+
+export function CloudAuthProvider(props: { readonly children: ReactNode }) {
+  const mode = cloudAuthMode();
+
+  useEffect(() => {
+    if (mode === null) {
+      deactivateCloudRelayAccount();
+    }
+  }, [mode]);
+
+  if (mode === "oidc") {
+    return <OidcCloudAuthBridge>{props.children}</OidcCloudAuthBridge>;
+  }
+
+  if (mode === "clerk") {
+    const publishableKey = resolveCloudPublicConfig().clerk.publishableKey;
+    if (!publishableKey) {
+      return props.children;
+    }
+    return (
+      <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+        <ClerkCloudAuthBridge>{props.children}</ClerkCloudAuthBridge>
+      </ClerkProvider>
+    );
+  }
+
+  return props.children;
 }

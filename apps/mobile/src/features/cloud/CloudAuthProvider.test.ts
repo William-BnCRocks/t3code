@@ -27,11 +27,18 @@ vi.mock("../../connection/catalog", () => ({
 }));
 
 vi.mock("./publicConfig", () => ({
+  cloudAuthMode: vi.fn(() => null),
   resolveCloudPublicConfig: vi.fn(() => ({
     clerk: { publishableKey: null },
     relay: { url: null },
   })),
   resolveRelayClerkTokenOptions: vi.fn(),
+}));
+
+vi.mock("./oidcSession", () => ({
+  ensureOidcSessionInitialized: vi.fn(() => Promise.resolve()),
+  getOidcAccessToken: vi.fn(() => Promise.resolve(null)),
+  oidcSessionAtom: {},
 }));
 
 vi.mock("../agent-awareness/remoteRegistration", () => ({
@@ -56,5 +63,26 @@ describe("CloudAuthProvider relay account isolation", () => {
     expect(appAtomRegistry.get(managedRelaySessionAtom)).toBeNull();
     expect(vi.mocked(setAgentAwarenessRelayTokenProvider)).toHaveBeenLastCalledWith(null);
     await cleanup;
+  });
+
+  // activateCloudRelayAccount/deactivateCloudRelayAccount are the shared code
+  // path CloudAuthBridge drives from either provider (see CloudAuthProvider.tsx's
+  // ClerkCloudAuthBridge and OidcCloudAuthBridge) — this only asserts they are
+  // just as provider-agnostic when the caller is OIDC-shaped (accountId is a
+  // token `sub`, tokenProvider resolves an OIDC access token) as they are for Clerk.
+  it("activates and deactivates a relay account driven by an OIDC-style token provider", () => {
+    const tokenProvider = async () => "oidc-access-token";
+    activateCloudRelayAccount("oidc-user-1", tokenProvider);
+    expect(appAtomRegistry.get(managedRelaySessionAtom)).toMatchObject({
+      accountId: "oidc-user-1",
+    });
+    expect(vi.mocked(setAgentAwarenessRelayTokenProvider)).toHaveBeenLastCalledWith(
+      tokenProvider,
+      "oidc-user-1",
+    );
+
+    deactivateCloudRelayAccount();
+    expect(appAtomRegistry.get(managedRelaySessionAtom)).toBeNull();
+    expect(vi.mocked(setAgentAwarenessRelayTokenProvider)).toHaveBeenLastCalledWith(null);
   });
 });

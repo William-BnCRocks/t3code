@@ -19,6 +19,10 @@ export interface CloudPublicConfig {
     readonly publishableKey: string | null;
     readonly jwtTemplate: string | null;
   };
+  readonly oidc: {
+    readonly issuerUrl: string | null;
+    readonly clientId: string | null;
+  };
   readonly relay: {
     readonly url: string | null;
   };
@@ -56,11 +60,33 @@ function normalizeSecureUrl(value: unknown): string | null {
   }
 }
 
+// Like normalizeSecureUrl, but also strips a trailing slash: OIDC issuers are
+// compared and interpolated into well-known discovery paths verbatim, so a
+// stray trailing slash would produce a double slash there. Unlike the relay
+// URL, an issuer may legitimately carry a path (e.g. a realm segment), so it
+// cannot reuse normalizeSecureRelayUrl's origin-only normalization.
+function normalizeOidcIssuerUrl(value: unknown): string | null {
+  const raw = trimNonEmpty(value);
+  if (raw === null) {
+    return null;
+  }
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" ? url.toString().replace(/\/+$/u, "") : null;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
   return {
     clerk: {
       publishableKey: trimNonEmpty(extra?.clerk?.publishableKey),
       jwtTemplate: trimNonEmpty(extra?.clerk?.jwtTemplate),
+    },
+    oidc: {
+      issuerUrl: normalizeOidcIssuerUrl(extra?.oidc?.issuerUrl),
+      clientId: trimNonEmpty(extra?.oidc?.clientId),
     },
     relay: {
       url: normalizeSecureRelayUrl(trimNonEmpty(extra?.relay?.url) ?? ""),
@@ -73,9 +99,37 @@ export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig
   } satisfies CloudPublicConfig;
 }
 
+export function resolveOidcPublicConfig(
+  config: CloudPublicConfig = resolveCloudPublicConfig(),
+): { readonly issuerUrl: string; readonly clientId: string } | null {
+  const { issuerUrl, clientId } = config.oidc;
+  return issuerUrl && clientId ? { issuerUrl, clientId } : null;
+}
+
+export type CloudAuthMode = "oidc" | "clerk";
+
+/**
+ * Which auth backend powers T3 Connect on this build. OIDC takes precedence
+ * over Clerk when both are configured, so an environment can be migrated by
+ * adding the OIDC config without first removing the Clerk one.
+ */
+export function cloudAuthMode(
+  config: CloudPublicConfig = resolveCloudPublicConfig(),
+): CloudAuthMode | null {
+  if (!config.relay.url) {
+    return null;
+  }
+  if (resolveOidcPublicConfig(config)) {
+    return "oidc";
+  }
+  if (config.clerk.publishableKey && config.clerk.jwtTemplate) {
+    return "clerk";
+  }
+  return null;
+}
+
 export function hasCloudPublicConfig(): boolean {
-  const config = resolveCloudPublicConfig();
-  return Boolean(config.clerk.publishableKey && config.clerk.jwtTemplate && config.relay.url);
+  return cloudAuthMode() !== null;
 }
 
 type Configured<T> = {

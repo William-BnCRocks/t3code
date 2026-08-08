@@ -1,5 +1,4 @@
 import { NativeHeaderToolbar } from "../../native/StackHeader";
-import { useAuth } from "@clerk/expo";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useCallback, useEffect, useState } from "react";
 import { Platform, Pressable, RefreshControl, ScrollView, View } from "react-native";
@@ -14,6 +13,7 @@ import { splitEnvironmentSections } from "../connection/environmentSections";
 import { useConnectionController } from "../connection/useConnectionController";
 import { optOutOfConnectOnboarding } from "./connectOnboardingOptOut";
 import { hasCloudPublicConfig } from "./publicConfig";
+import { useCloudAuth } from "./useCloudAuth";
 
 /**
  * Post-sign-in onboarding sheet for T3 Connect. Mobile never publishes
@@ -44,7 +44,7 @@ export function ConnectOnboardingRouteScreen() {
 function ConfiguredConnectOnboardingRouteScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { isSignedIn, userId } = useAuth({ treatPendingAsSignedOut: false });
+  const { isSignedIn, userId } = useCloudAuth();
   const { connectedEnvironments, onReconnectEnvironment } = useRemoteConnections();
   const { refreshRelayEnvironments } = useConnectionController();
   const { connectedCloudEnvironments } = splitEnvironmentSections({

@@ -1,4 +1,3 @@
-import { useAuth, useUser } from "@clerk/expo";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
@@ -40,7 +39,9 @@ import {
 } from "../agent-awareness/remoteRegistration";
 import { refreshManagedRelayEnvironments } from "../cloud/managedRelayState";
 import { useClerkSettingsSheetDetent } from "../cloud/ClerkSettingsSheetDetent";
-import { hasCloudPublicConfig, resolveRelayClerkTokenOptions } from "../cloud/publicConfig";
+import { hasCloudPublicConfig } from "../cloud/publicConfig";
+import { useCloudAuth } from "../cloud/useCloudAuth";
+import { startOidcSignIn } from "./oidcSignInAction";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
 import { WorkspaceSidebarToolbar } from "../layout/workspace-sidebar-toolbar";
 import { runtime } from "../../lib/runtime";
@@ -152,8 +153,7 @@ function ConfiguredSettingsRouteScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const { expand: expandClerkSheet } = useClerkSettingsSheetDetent();
-  const { getToken, isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
-  const { user } = useUser();
+  const { displayIdentity, getRelayToken, isLoaded, isSignedIn, signIn } = useCloudAuth();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [notificationStatus, setNotificationStatus] = useState<NotificationStatus>("checking");
   const [liveActivityStatus, setLiveActivityStatus] = useState<LiveActivityStatus>("checking");
@@ -167,8 +167,8 @@ function ConfiguredSettingsRouteScreen() {
   const accountLabel = useMemo(() => {
     if (!isLoaded) return "Checking";
     if (!isSignedIn) return "Sign in";
-    return user?.primaryEmailAddress?.emailAddress ?? "Signed in";
-  }, [isLoaded, isSignedIn, user?.primaryEmailAddress?.emailAddress]);
+    return displayIdentity ?? "Signed in";
+  }, [displayIdentity, isLoaded, isSignedIn]);
 
   const refreshNotifications = useCallback(async () => {
     if (process.env.EXPO_OS !== "ios") {
@@ -279,11 +279,19 @@ function ConfiguredSettingsRouteScreen() {
         { text: "Cancel", style: "cancel" },
         {
           text: "Continue",
-          onPress: () => navigation.navigate("SettingsSheet", { screen: "SettingsAuth" }),
+          onPress: () => {
+            // In OIDC mode the sign-in page is the identity provider itself,
+            // so skip the in-app screen and hand off to the browser directly.
+            if (signIn) {
+              startOidcSignIn(signIn);
+              return;
+            }
+            navigation.navigate("SettingsSheet", { screen: "SettingsAuth" });
+          },
         },
       ],
     );
-  }, [navigation]);
+  }, [navigation, signIn]);
 
   const linkEnvironments = useCallback(async () => {
     if (!isSignedIn) {
@@ -292,7 +300,7 @@ function ConfiguredSettingsRouteScreen() {
     }
 
     setLiveActivityStatus("linking");
-    const tokenResult = await settlePromise(() => getToken(resolveRelayClerkTokenOptions()));
+    const tokenResult = await settlePromise(() => getRelayToken());
     if (tokenResult._tag === "Failure") {
       setLiveActivityStatus("disabled");
       const error = squashAtomCommandFailure(tokenResult);
@@ -352,7 +360,7 @@ function ConfiguredSettingsRouteScreen() {
   }, [
     connections,
     environmentCount,
-    getToken,
+    getRelayToken,
     isSignedIn,
     liveActivitiesPreferenceEnabled,
     promptSignIn,
@@ -385,9 +393,7 @@ function ConfiguredSettingsRouteScreen() {
         void (async () => {
           let token: string | null = null;
           if (isSignedIn) {
-            const tokenResult = await settlePromise(() =>
-              getToken(resolveRelayClerkTokenOptions()),
-            );
+            const tokenResult = await settlePromise(() => getRelayToken());
             if (tokenResult._tag === "Failure") {
               reportAtomCommandResult(tokenResult, {
                 label: "live activity disable token lookup",
@@ -429,7 +435,7 @@ function ConfiguredSettingsRouteScreen() {
     },
     [
       connections,
-      getToken,
+      getRelayToken,
       isSignedIn,
       linkEnvironments,
       liveActivitiesPreferenceEnabled,
@@ -440,14 +446,13 @@ function ConfiguredSettingsRouteScreen() {
 
   const openAccount = useCallback(() => {
     if (!isLoaded) return;
-    if (!isSignedIn) {
-      expandClerkSheet();
-      navigation.navigate("SettingsSheet", { screen: "SettingsAuth" });
+    if (!isSignedIn && signIn) {
+      startOidcSignIn(signIn);
       return;
     }
     expandClerkSheet();
     navigation.navigate("SettingsSheet", { screen: "SettingsAuth" });
-  }, [expandClerkSheet, isLoaded, isSignedIn, navigation]);
+  }, [expandClerkSheet, isLoaded, isSignedIn, navigation, signIn]);
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">

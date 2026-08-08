@@ -11,7 +11,11 @@ Object.assign(process.env, repoEnv);
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 
+const oidcIssuerUrl = repoEnv.EXPO_PUBLIC_OIDC_ISSUER_URL?.trim().replace(/\/+$/u, "");
+const oidcMobileClientId = repoEnv.EXPO_PUBLIC_OIDC_MOBILE_CLIENT_ID?.trim();
+
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
+const iosBundleIdentifierOverride = repoEnv.T3CODE_IOS_BUNDLE_ID?.trim();
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
 const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
@@ -23,6 +27,15 @@ if (
 ) {
   throw new Error(
     "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
+  );
+}
+
+if (
+  iosBundleIdentifierOverride !== undefined &&
+  !IOS_BUNDLE_IDENTIFIER_PATTERN.test(iosBundleIdentifierOverride)
+) {
+  throw new Error(
+    "T3CODE_IOS_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when set.",
   );
 }
 
@@ -98,9 +111,18 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
+// Mirrors the checked-in variant scheme so overridden builds still install
+// side-by-side: production uses the override verbatim, other variants append
+// their suffix (<override>.dev / <override>.preview).
+const overriddenVariantBundleIdentifier =
+  iosBundleIdentifierOverride === undefined
+    ? undefined
+    : APP_VARIANT === "production"
+      ? iosBundleIdentifierOverride
+      : `${iosBundleIdentifierOverride}.${APP_VARIANT === "development" ? "dev" : "preview"}`;
 const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
-  : variant.iosBundleIdentifier;
+  : (overriddenVariantBundleIdentifier ?? variant.iosBundleIdentifier);
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -330,6 +352,12 @@ const config: ExpoConfig = {
       publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? null,
       jwtTemplate: repoEnv.EXPO_PUBLIC_CLERK_JWT_TEMPLATE ?? null,
     },
+    // Alternative to Clerk for T3 Connect; takes precedence when both are
+    // configured. Omitted entirely (not nulled) when either half is missing,
+    // matching the Google client id fields below.
+    ...(oidcIssuerUrl && oidcMobileClientId
+      ? { oidc: { issuerUrl: oidcIssuerUrl, clientId: oidcMobileClientId } }
+      : {}),
     // Native Google sign-in credentials. @clerk/expo reads these from `extra`
     // under their exact env-var names (not nested), and its config plugin reads
     // the iOS URL scheme at prebuild to register it in Info.plist.
