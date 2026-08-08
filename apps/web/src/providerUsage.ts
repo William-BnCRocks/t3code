@@ -553,6 +553,59 @@ export function deriveUsageOverview(
 }
 
 /**
+ * Scopes the "worst" candidate to a single chat's own provider account, so a
+ * maxed account on another provider or instance can never paint this chat's
+ * ring red — the ring must reflect only the instance that chat actually uses.
+ *
+ * `instanceId` undefined is the global overlay's back-compat path: returns
+ * `overview.worst` unchanged. Otherwise the instance is looked up in the
+ * environment matching `environmentId` first, then the remaining reachable
+ * environments (instance ids could in principle repeat across environments,
+ * but the thread's own environment wins). Unreachable environments are
+ * skipped, mirroring the anti-flap rule in the global `worst` loop above — a
+ * disconnected backend's stale windows must not drive the ring. Once the
+ * instance is found, its own state decides the result; there is no fallback
+ * to a same-id instance in another environment or to the global worst, since
+ * that fallback is exactly what reintroduces cross-account bleed.
+ */
+export function selectScopedWorst(
+  overview: UsageOverview,
+  environmentId: EnvironmentId | undefined,
+  instanceId: ProviderInstanceId | undefined,
+): UsageWorstCandidate | null {
+  if (instanceId === undefined) return overview.worst;
+
+  const reachableEnvironments = overview.environments.filter(
+    (environment) => environment.isReachable,
+  );
+  const ownEnvironment = reachableEnvironments.find(
+    (environment) => environment.environmentId === environmentId,
+  );
+  const searchOrder = ownEnvironment
+    ? [
+        ownEnvironment,
+        ...reachableEnvironments.filter((environment) => environment !== ownEnvironment),
+      ]
+    : reachableEnvironments;
+
+  for (const environment of searchOrder) {
+    const instance = environment.instances.find((candidate) => candidate.instanceId === instanceId);
+    if (!instance) continue;
+    if (instance.state !== "ok" || !instance.worst) return null;
+    const window = instance.worst;
+    return {
+      severity: window.severity,
+      usedPercent: window.usedPercent ?? (window.status === "rejected" ? 100 : null),
+      window,
+      instance,
+      environment,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Percent formatting shared by the ring, trigger aria-label, and window row
  * value column — copied from ContextWindowMeter's `formatPercentage`
  * (sub-10% keeps one decimal, otherwise rounds to a whole number).

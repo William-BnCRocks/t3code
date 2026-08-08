@@ -5,8 +5,9 @@ import { cn } from "~/lib/utils";
 import {
   formatUsagePercent,
   isUsageOverviewLoading,
+  selectScopedWorst,
   useProviderUsageOverview,
-  type UsageOverview,
+  type UsageWorstCandidate,
 } from "~/providerUsage";
 import { useProviderUsageOverlayStore } from "~/providerUsageOverlayStore";
 import { useEnvironments } from "~/state/environments";
@@ -18,18 +19,22 @@ import { ProviderUsageRing } from "./ProviderUsageRing";
 export interface ProviderUsageMeterProps {
   environmentId?: EnvironmentId | undefined;
   /**
-   * The active thread's provider instance, used only to draw the 1px accent
-   * rail on that instance's row inside the panel (§4.4). Composer-shell only;
-   * the global fallback overlay never has an "active" instance to highlight.
+   * The active thread's provider instance. Drives the 1px accent rail on
+   * that instance's row inside the panel (§4.4), AND scopes the trigger
+   * ring/aria-label to this instance's own worst window via
+   * `selectScopedWorst` — a maxed account on another provider or instance
+   * must never paint this chat's ring red. Composer-shell only; the global
+   * fallback overlay never has an "active" instance, so it keeps rendering
+   * the overview-wide worst.
    */
   activeInstanceId?: ProviderInstanceId | undefined;
 }
 
-function buildTriggerAriaLabel(overview: UsageOverview, isLoading: boolean): string {
-  if (isLoading || !overview.worst) {
+function buildTriggerAriaLabel(worst: UsageWorstCandidate | null, isLoading: boolean): string {
+  if (isLoading || !worst) {
     return "Provider usage: no limits reported yet";
   }
-  const { instance, window, usedPercent } = overview.worst;
+  const { instance, window, usedPercent } = worst;
   const resetsClause = window.resetsAt
     ? `, resets ${formatRelativeTimeUntilLabel(window.resetsAt)}`
     : "";
@@ -54,8 +59,8 @@ export function ProviderUsageMeter(props: ProviderUsageMeterProps) {
   }
 
   const isLoading = isUsageOverviewLoading(overview, isReady);
-  const worst = overview.worst;
-  const ariaLabel = buildTriggerAriaLabel(overview, isLoading);
+  const worst = selectScopedWorst(overview, props.environmentId, props.activeInstanceId);
+  const ariaLabel = buildTriggerAriaLabel(worst, isLoading);
 
   return (
     <Popover open={isOpen} onOpenChange={setOpen}>

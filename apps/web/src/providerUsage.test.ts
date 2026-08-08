@@ -11,6 +11,7 @@ import {
   computeWindowSeverity,
   deriveUsageOverview,
   resolveWindowLabels,
+  selectScopedWorst,
   USAGE_CRITICAL_PERCENT,
   USAGE_WARNING_PERCENT,
   type UsageEnvironmentInput,
@@ -670,5 +671,221 @@ describe("deriveUsageOverview — disconnected environments", () => {
     expect(overview.environments[0]?.statusText).toContain("Connection failed");
     expect(overview.environments[0]?.instances).toHaveLength(1);
     expect(overview.worst).toBeNull();
+  });
+});
+
+describe("selectScopedWorst", () => {
+  it("scopes to the chat's own instance, ignoring a critical instance on a different provider", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "codex",
+              driver: "codex",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 97, status: "allowed" }],
+              },
+            }),
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 10, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    // Sanity: the global worst is the maxed Codex account, which is exactly
+    // the cross-account bleed this scoping exists to prevent.
+    expect(overview.worst?.instance.instanceId).toBe(ProviderInstanceId.make("codex"));
+
+    const scoped = selectScopedWorst(
+      overview,
+      EnvironmentId.make("env-primary"),
+      ProviderInstanceId.make("claudeAgent"),
+    );
+    expect(scoped?.instance.instanceId).toBe(ProviderInstanceId.make("claudeAgent"));
+    expect(scoped?.severity).toBe("ok");
+  });
+
+  it("returns null for an absent instance even though another instance is critical", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({ instanceId: "claudeAgent" }),
+            provider({
+              instanceId: "codex",
+              driver: "codex",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 97, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    const scoped = selectScopedWorst(
+      overview,
+      EnvironmentId.make("env-primary"),
+      ProviderInstanceId.make("claudeAgent"),
+    );
+    expect(scoped).toBeNull();
+  });
+
+  it("returns null for a planOnly instance even though another instance is critical", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "grok",
+              driver: "grok",
+              rateLimits: { observedAt: NOW_ISO, windows: [], planLabel: "SuperGrok · BnC" },
+            }),
+            provider({
+              instanceId: "codex",
+              driver: "codex",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 97, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    const scoped = selectScopedWorst(
+      overview,
+      EnvironmentId.make("env-primary"),
+      ProviderInstanceId.make("grok"),
+    );
+    expect(scoped).toBeNull();
+  });
+
+  it("falls back to overview.worst by reference when instanceId is undefined", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 50, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    expect(selectScopedWorst(overview, EnvironmentId.make("env-primary"), undefined)).toBe(
+      overview.worst,
+    );
+  });
+
+  it("returns null when the matching instance only lives on an unreachable environment", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          phase: "error",
+          connectionError: "boom",
+          providers: [
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 97, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    const scoped = selectScopedWorst(
+      overview,
+      EnvironmentId.make("env-primary"),
+      ProviderInstanceId.make("claudeAgent"),
+    );
+    expect(scoped).toBeNull();
+  });
+
+  it("prefers the environmentId-matching environment when the same instanceId exists on two", () => {
+    const overview = deriveUsageOverview(
+      [
+        // Listed first in the array, but its environmentId does NOT match the
+        // scope below — the matching environment must still win over array order.
+        environment({
+          environmentId: EnvironmentId.make("env-b"),
+          label: "Secondary",
+          isPrimary: false,
+          providers: [
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 95, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+        environment({
+          environmentId: EnvironmentId.make("env-a"),
+          providers: [
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", usedPercent: 20, status: "allowed" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    const scoped = selectScopedWorst(
+      overview,
+      EnvironmentId.make("env-a"),
+      ProviderInstanceId.make("claudeAgent"),
+    );
+    expect(scoped?.environment.environmentId).toBe(EnvironmentId.make("env-a"));
+    expect(scoped?.usedPercent).toBe(20);
+  });
+
+  it("maps a rejected window with no usedPercent to 100", () => {
+    const overview = deriveUsageOverview(
+      [
+        environment({
+          providers: [
+            provider({
+              instanceId: "claudeAgent",
+              rateLimits: {
+                observedAt: NOW_ISO,
+                windows: [{ kind: "five_hour", status: "rejected" }],
+              },
+            }),
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    const scoped = selectScopedWorst(
+      overview,
+      EnvironmentId.make("env-primary"),
+      ProviderInstanceId.make("claudeAgent"),
+    );
+    expect(scoped?.severity).toBe("critical");
+    expect(scoped?.usedPercent).toBe(100);
   });
 });
