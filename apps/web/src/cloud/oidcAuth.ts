@@ -231,8 +231,10 @@ async function requestOidcToken(
     body: new URLSearchParams(params).toString(),
   });
   if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    console.error("[t3-oidc] token endpoint error", response.status, body);
     throw new OidcAuthError(
-      `The OIDC token endpoint returned ${response.status}.`,
+      `The OIDC token endpoint returned ${response.status}${body ? `: ${body}` : "."}`,
       response.status,
     );
   }
@@ -303,7 +305,9 @@ async function oidcSignInViaDesktopBridge(
     state,
     challenge,
   });
+  console.info("[t3-oidc] opening system browser via desktop bridge");
   const { code } = await bridge(authorizeUrl, state);
+  console.info("[t3-oidc] received authorization code from loopback", { hasCode: Boolean(code) });
   const tokenResponse = await requestOidcToken(metadata.tokenEndpoint, {
     grant_type: "authorization_code",
     client_id: config.clientId,
@@ -311,7 +315,9 @@ async function oidcSignInViaDesktopBridge(
     redirect_uri: OIDC_DESKTOP_LOOPBACK_REDIRECT_URI,
     code_verifier: verifier,
   });
+  console.info("[t3-oidc] token exchange ok; storing session");
   writeStoredSession(sessionFromTokenResponse(tokenResponse, null));
+  console.info("[t3-oidc] session stored; signed in");
 }
 
 /**

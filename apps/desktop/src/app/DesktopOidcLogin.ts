@@ -231,10 +231,14 @@ export const make = Effect.fn("desktop.oidcLogin.make")(function* (
       disableLogger: true,
     }).pipe(
       Layer.provide(
+        // Preemptive shutdown (the default) is required: the browser keeps the
+        // callback connection alive while showing the result page, so a
+        // graceful shutdown would block the login fiber from ever returning
+        // the captured code. Bound the wait so shutdown can never stall.
         NodeHttpServer.layer(NodeHttp.createServer, {
           host: OIDC_LOOPBACK_HOST,
           port: OIDC_LOOPBACK_PORT,
-          disablePreemptiveShutdown: true,
+          gracefulShutdownTimeout: Duration.seconds(1),
         }),
       ),
       Layer.build,
