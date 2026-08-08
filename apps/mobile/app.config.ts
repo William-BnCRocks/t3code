@@ -10,6 +10,11 @@ Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
+// Omits the widget and share extensions (and with them the App Group
+// entitlement) without the Personal Team build's other capability
+// downgrades: push and Sign in with Apple stay. Useful when provisioning
+// cannot associate App Groups (e.g. API-key-only signing pipelines).
+const omitIosExtensions = isIosPersonalTeamBuild || repoEnv.T3CODE_IOS_OMIT_EXTENSIONS === "1";
 
 const oidcIssuerUrl = repoEnv.EXPO_PUBLIC_OIDC_ISSUER_URL?.trim().replace(/\/+$/u, "");
 const oidcMobileClientId = repoEnv.EXPO_PUBLIC_OIDC_MOBILE_CLIENT_ID?.trim();
@@ -157,7 +162,7 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
       // Personal Teams cannot sign App Groups or extension targets. Keep the
       // reduced-capability local build usable while release builds expose the
       // real system share target.
-      enabled: !isIosPersonalTeamBuild,
+      enabled: !omitIosExtensions,
       extensionBundleIdentifier: `${iosBundleIdentifier}.sharing`,
       appGroupId: `group.${iosBundleIdentifier}`,
       activationRule: {
@@ -265,7 +270,7 @@ const config: ExpoConfig = {
     ],
     "expo-secure-store",
     "expo-sqlite",
-    ...(isIosPersonalTeamBuild
+    ...(omitIosExtensions
       ? [sharingPlugin]
       : ["./plugins/withShareExtensionDisplayName.cjs", sharingPlugin]),
     [
@@ -333,7 +338,7 @@ const config: ExpoConfig = {
     // expo-widgets' — its dangerous mod wipes ios/ExpoWidgetsTarget/ (which
     // would delete the asset catalog) and its xcodeproj mod creates the widget
     // target (which must exist before the compile phase can be attached).
-    ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
+    ...(!omitIosExtensions ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
     "./plugins/withIosSceneLifecycle.cjs",
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
