@@ -350,6 +350,7 @@ const config: ExpoConfig = {
   extra: {
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
+    iosExtensionsOmitted: omitIosExtensions,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,
     },

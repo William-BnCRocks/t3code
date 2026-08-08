@@ -45,7 +45,9 @@ function receiveSharingEnabled(): boolean {
   if (Platform.OS !== "ios") {
     return false;
   }
-  return Constants.expoConfig?.extra?.iosPersonalTeamBuild !== true;
+  // Builds without the share extension have no app group, so the native
+  // shared-payload store cannot exist; importing would throw on launch.
+  return Constants.expoConfig?.extra?.iosExtensionsOmitted !== true;
 }
 
 async function resolvedPayloadsForImages(): Promise<ReadonlyArray<ResolvedSharePayload>> {
