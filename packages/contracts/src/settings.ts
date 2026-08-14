@@ -478,6 +478,17 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
 export const ServerSettings = Schema.Struct({
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Streaming assistant deltas are coalesced into one persisted event per
+  // window to keep the event log and projection pipeline off the hot path.
+  // Zero disables coalescing and persists every provider delta as its own
+  // event.
+  assistantStreamingCoalesceInterval: Schema.DurationFromMillis.pipe(
+    Schema.withDecodingDefault(Effect.succeed(200)),
+  ),
+  // Orchestration events older than this many days that every projector has
+  // already applied are compacted away at startup. Zero keeps the event log
+  // append-only forever.
+  eventLogRetentionDays: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(14))),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -635,6 +646,8 @@ const OpenCodeSettingsPatch = Schema.Struct({
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
+  assistantStreamingCoalesceInterval: Schema.optionalKey(Schema.DurationFromMillis),
+  eventLogRetentionDays: Schema.optionalKey(Schema.Number),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

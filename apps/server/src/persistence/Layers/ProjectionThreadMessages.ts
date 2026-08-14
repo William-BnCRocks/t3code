@@ -5,10 +5,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
-import { ChatAttachment } from "@t3tools/contracts";
+import { ChatAttachment, IsoDateTime } from "@t3tools/contracts";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  GetLatestUserMessageCreatedAtByThreadIdInput,
   GetProjectionThreadMessageInput,
   ProjectionThreadMessageRepository,
   type ProjectionThreadMessageRepositoryShape,
@@ -23,6 +24,10 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
   }),
 );
+
+const LatestUserMessageCreatedAtRowSchema = Schema.Struct({
+  latestUserMessageCreatedAt: Schema.NullOr(IsoDateTime),
+});
 
 function toProjectionThreadMessage(
   row: Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>,
@@ -146,6 +151,21 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  // MAX() over an empty match set still returns exactly one row (with a SQL
+  // NULL), so `findOne` — not `findOneOption` — is the right shape here.
+  const readLatestUserMessageCreatedAtRow = SqlSchema.findOne({
+    Request: GetLatestUserMessageCreatedAtByThreadIdInput,
+    Result: LatestUserMessageCreatedAtRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          MAX(created_at) AS "latestUserMessageCreatedAt"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+          AND role = 'user'
+      `,
+  });
+
   const upsert: ProjectionThreadMessageRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadMessageRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadMessageRepository.upsert:query")),
@@ -174,11 +194,23 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       ),
     );
 
+  const getLatestUserMessageCreatedAtByThreadId: ProjectionThreadMessageRepositoryShape["getLatestUserMessageCreatedAtByThreadId"] =
+    (input) =>
+      readLatestUserMessageCreatedAtRow(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError(
+            "ProjectionThreadMessageRepository.getLatestUserMessageCreatedAtByThreadId:query",
+          ),
+        ),
+        Effect.map((row) => row.latestUserMessageCreatedAt),
+      );
+
   return {
     upsert,
     getByMessageId,
     listByThreadId,
     deleteByThreadId,
+    getLatestUserMessageCreatedAtByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;
 });
 

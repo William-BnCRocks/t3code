@@ -146,8 +146,17 @@ export class ServerSettingsService extends Context.Service<
 
 const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
   Effect.gen(function* () {
-    const { automaticGitFetchInterval, providerHealthRefreshInterval, ...overridesForMerge } =
-      overrides;
+    // Duration values are opaque tagged objects: deepMerge would recurse into
+    // their internal fields and hand back a plain object that decodes wrong
+    // (loses the Duration brand). Apply them as whole-value replacements
+    // after the generic merge instead, same as the other Duration-typed
+    // settings above.
+    const {
+      automaticGitFetchInterval,
+      providerHealthRefreshInterval,
+      assistantStreamingCoalesceInterval,
+      ...overridesForMerge
+    } = overrides;
     const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
     const initialSettings = yield* normalizeServerSettings({
       ...merged,
@@ -156,6 +165,12 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         : {}),
       ...(providerHealthRefreshInterval !== undefined
         ? { providerHealthRefreshInterval: providerHealthRefreshInterval as Duration.Duration }
+        : {}),
+      ...(assistantStreamingCoalesceInterval !== undefined
+        ? {
+            assistantStreamingCoalesceInterval:
+              assistantStreamingCoalesceInterval as Duration.Duration,
+          }
         : {}),
     });
     const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);

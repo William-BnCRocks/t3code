@@ -44,6 +44,12 @@ export const GetProjectionThreadMessageInput = Schema.Struct({
 });
 export type GetProjectionThreadMessageInput = typeof GetProjectionThreadMessageInput.Type;
 
+export const GetLatestUserMessageCreatedAtByThreadIdInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type GetLatestUserMessageCreatedAtByThreadIdInput =
+  typeof GetLatestUserMessageCreatedAtByThreadIdInput.Type;
+
 export const DeleteProjectionThreadMessagesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -77,6 +83,16 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly listByThreadId: (
     input: ListProjectionThreadMessagesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadMessage>, ProjectionRepositoryError>;
+
+  /**
+   * Read the most recent `created_at` among a thread's user-role messages,
+   * without loading the thread's full message history.
+   *
+   * Returns `null` when the thread has no user messages.
+   */
+  readonly getLatestUserMessageCreatedAtByThreadId: (
+    input: GetLatestUserMessageCreatedAtByThreadIdInput,
+  ) => Effect.Effect<IsoDateTime | null, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread messages by thread.

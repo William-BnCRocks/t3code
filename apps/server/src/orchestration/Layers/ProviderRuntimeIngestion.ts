@@ -20,10 +20,12 @@ import {
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -714,6 +716,21 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(""),
   });
 
+  // Serializes every buffered-assistant-text take+dispatch critical section
+  // (coalesce timer flush, barrier flush, finalize) so a timer firing
+  // concurrently with a barrier can never race a read-then-clear of the same
+  // buffer. Uncontended in buffered mode and in streaming mode with coalescing
+  // disabled, since neither path forks a timer.
+  const assistantFlushSemaphore = yield* Semaphore.make(1);
+
+  // Tracks which assistant message ids currently have a coalesce flush timer
+  // in flight, so a burst of deltas within one coalesce window schedules at
+  // most one timer per message id. Plain map, not a Cache: membership only
+  // needs synchronous check-and-set, never TTL/capacity eviction, and the
+  // entry is always removed by the timer itself shortly after (bounded by
+  // the coalesce interval).
+  const pendingAssistantDeltaFlushes = new Map<MessageId, true>();
+
   const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantSegmentState>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
     timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
@@ -942,6 +959,9 @@ const make = Effect.gen(function* () {
   const clearAssistantMessageState = (messageId: MessageId) =>
     clearBufferedAssistantText(messageId);
 
+  // Take-through-dispatch runs under `assistantFlushSemaphore` so a coalesce
+  // timer can never interleave with another flush of the same message's
+  // buffer (see the semaphore's declaration above).
   const flushBufferedAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
@@ -950,23 +970,25 @@ const make = Effect.gen(function* () {
     createdAt: string;
     commandTag: string;
   }) =>
-    Effect.gen(function* () {
-      const bufferedText = yield* takeBufferedAssistantText(input.messageId);
-      if (!hasRenderableAssistantText(bufferedText)) {
-        return false;
-      }
+    assistantFlushSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const bufferedText = yield* takeBufferedAssistantText(input.messageId);
+        if (!hasRenderableAssistantText(bufferedText)) {
+          return false;
+        }
 
-      yield* orchestrationEngine.dispatch({
-        type: "thread.message.assistant.delta",
-        commandId: yield* providerCommandId(input.event, input.commandTag),
-        threadId: input.threadId,
-        messageId: input.messageId,
-        delta: bufferedText,
-        ...(input.turnId ? { turnId: input.turnId } : {}),
-        createdAt: input.createdAt,
-      });
-      return true;
-    });
+        yield* orchestrationEngine.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: yield* providerCommandId(input.event, input.commandTag),
+          threadId: input.threadId,
+          messageId: input.messageId,
+          delta: bufferedText,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+          createdAt: input.createdAt,
+        });
+        return true;
+      }),
+    );
 
   const flushBufferedAssistantMessagesForTurn = (input: {
     event: ProviderRuntimeEvent;
@@ -1001,6 +1023,89 @@ const make = Effect.gen(function* () {
       return flushedMessageIds;
     });
 
+  // Appends a streamed delta to the buffer and, only on overflow, spills the
+  // whole buffered text immediately as its own command. Shared by buffered
+  // mode and coalesced-streaming mode, which spill identically; they differ
+  // only in what happens when the buffer does *not* overflow.
+  const dispatchAssistantDeltaSpillIfAny = (input: {
+    event: ProviderRuntimeEvent;
+    threadId: ThreadId;
+    messageId: MessageId;
+    turnId?: TurnId;
+    delta: string;
+    createdAt: string;
+  }) =>
+    // Runs under the flush semaphore like every other take+dispatch: an
+    // overflow spill drains the buffer too, and its dispatch must not
+    // overtake a coalesce-timer flush that already took earlier text but
+    // has not reached the engine queue yet.
+    assistantFlushSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const spillChunk = yield* appendBufferedAssistantText(input.messageId, input.delta);
+        if (spillChunk.length === 0) {
+          return;
+        }
+        yield* orchestrationEngine.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: yield* providerCommandId(input.event, "assistant-delta-buffer-spill"),
+          threadId: input.threadId,
+          messageId: input.messageId,
+          delta: spillChunk,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+          createdAt: input.createdAt,
+        });
+      }),
+    );
+
+  // Ensures a coalesce flush is scheduled for `messageId`: at most one
+  // pending timer per message id (tracked via `pendingAssistantDeltaFlushes`).
+  // The context needed to dispatch (thread/turn/triggering event) is captured
+  // now, at schedule time; `createdAt` is computed fresh when the timer fires.
+  // The forked fiber is scoped to this service's lifetime — if the scope
+  // closes with the timer still sleeping (shutdown), it is simply
+  // interrupted, same as any other never-flushed buffered text today.
+  const scheduleCoalescedAssistantFlush = (input: {
+    event: ProviderRuntimeEvent;
+    threadId: ThreadId;
+    messageId: MessageId;
+    turnId?: TurnId;
+    interval: Duration.Duration;
+  }) =>
+    Effect.gen(function* () {
+      // Single synchronous check-and-set: no `yield*` between the check and
+      // the set, so a timer racing to clear its own entry can never land
+      // between them and cause two timers to be scheduled for one message id.
+      const alreadyPending = yield* Effect.sync(() => {
+        if (pendingAssistantDeltaFlushes.has(input.messageId)) {
+          return true;
+        }
+        pendingAssistantDeltaFlushes.set(input.messageId, true);
+        return false;
+      });
+      if (alreadyPending) {
+        return;
+      }
+
+      yield* Effect.forkScoped(
+        Effect.gen(function* () {
+          yield* Effect.sleep(input.interval);
+          // Mark no-longer-pending as soon as the timer fires, before
+          // acquiring the flush semaphore, so a delta arriving while this
+          // flush is queued behind another one schedules a fresh timer
+          // instead of assuming this one still covers it.
+          pendingAssistantDeltaFlushes.delete(input.messageId);
+          yield* flushBufferedAssistantMessage({
+            event: input.event,
+            threadId: input.threadId,
+            messageId: input.messageId,
+            ...(input.turnId ? { turnId: input.turnId } : {}),
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+            commandTag: "assistant-delta-coalesced",
+          });
+        }),
+      );
+    });
+
   const finalizeAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
@@ -1013,37 +1118,45 @@ const make = Effect.gen(function* () {
     hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
-      const bufferedText = yield* takeBufferedAssistantText(input.messageId);
-      const text =
-        bufferedText.length > 0
-          ? bufferedText
-          : (input.fallbackText?.trim().length ?? 0) > 0
-            ? input.fallbackText!
-            : "";
-      const hasRenderableText = hasRenderableAssistantText(text);
+      // Take-through-both-dispatches runs under `assistantFlushSemaphore`,
+      // same as `flushBufferedAssistantMessage` above, so a coalesce timer
+      // can never interleave with this barrier's read-then-clear of the
+      // buffer.
+      yield* assistantFlushSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          const bufferedText = yield* takeBufferedAssistantText(input.messageId);
+          const text =
+            bufferedText.length > 0
+              ? bufferedText
+              : (input.fallbackText?.trim().length ?? 0) > 0
+                ? input.fallbackText!
+                : "";
+          const hasRenderableText = hasRenderableAssistantText(text);
 
-      if (hasRenderableText) {
-        yield* orchestrationEngine.dispatch({
-          type: "thread.message.assistant.delta",
-          commandId: yield* providerCommandId(input.event, input.finalDeltaCommandTag),
-          threadId: input.threadId,
-          messageId: input.messageId,
-          delta: text,
-          ...(input.turnId ? { turnId: input.turnId } : {}),
-          createdAt: input.createdAt,
-        });
-      }
+          if (hasRenderableText) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.message.assistant.delta",
+              commandId: yield* providerCommandId(input.event, input.finalDeltaCommandTag),
+              threadId: input.threadId,
+              messageId: input.messageId,
+              delta: text,
+              ...(input.turnId ? { turnId: input.turnId } : {}),
+              createdAt: input.createdAt,
+            });
+          }
 
-      if (input.hasProjectedMessage || hasRenderableText) {
-        yield* orchestrationEngine.dispatch({
-          type: "thread.message.assistant.complete",
-          commandId: yield* providerCommandId(input.event, input.commandTag),
-          threadId: input.threadId,
-          messageId: input.messageId,
-          ...(input.turnId ? { turnId: input.turnId } : {}),
-          createdAt: input.createdAt,
-        });
-      }
+          if (input.hasProjectedMessage || hasRenderableText) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.message.assistant.complete",
+              commandId: yield* providerCommandId(input.event, input.commandTag),
+              threadId: input.threadId,
+              messageId: input.messageId,
+              ...(input.turnId ? { turnId: input.turnId } : {}),
+              createdAt: input.createdAt,
+            });
+          }
+        }),
+      );
       yield* clearAssistantMessageState(input.messageId);
     });
 
@@ -1492,24 +1605,22 @@ const make = Effect.gen(function* () {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
 
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
+        const settings = yield* serverSettingsService.getSettings;
+        const assistantDeliveryMode: AssistantDeliveryMode = settings.enableAssistantStreaming
+          ? "streaming"
+          : "buffered";
+
         if (assistantDeliveryMode === "buffered") {
-          const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
-          if (spillChunk.length > 0) {
-            yield* orchestrationEngine.dispatch({
-              type: "thread.message.assistant.delta",
-              commandId: yield* providerCommandId(event, "assistant-delta-buffer-spill"),
-              threadId: thread.id,
-              messageId: assistantMessageId,
-              delta: spillChunk,
-              ...(turnId ? { turnId } : {}),
-              createdAt: now,
-            });
-          }
-        } else {
+          yield* dispatchAssistantDeltaSpillIfAny({
+            event,
+            threadId: thread.id,
+            messageId: assistantMessageId,
+            ...(turnId ? { turnId } : {}),
+            delta: assistantDelta,
+            createdAt: now,
+          });
+        } else if (Duration.isZero(settings.assistantStreamingCoalesceInterval)) {
+          // Legacy streaming behavior: one command per delta.
           yield* orchestrationEngine.dispatch({
             type: "thread.message.assistant.delta",
             commandId: yield* providerCommandId(event, "assistant-delta"),
@@ -1518,6 +1629,25 @@ const make = Effect.gen(function* () {
             delta: assistantDelta,
             ...(turnId ? { turnId } : {}),
             createdAt: now,
+          });
+        } else {
+          // Coalesced streaming: buffer like buffered mode (same spill
+          // safety valve), and make sure a timer is pending to flush the
+          // buffer as one command once the coalesce window elapses.
+          yield* dispatchAssistantDeltaSpillIfAny({
+            event,
+            threadId: thread.id,
+            messageId: assistantMessageId,
+            ...(turnId ? { turnId } : {}),
+            delta: assistantDelta,
+            createdAt: now,
+          });
+          yield* scheduleCoalescedAssistantFlush({
+            event,
+            threadId: thread.id,
+            messageId: assistantMessageId,
+            ...(turnId ? { turnId } : {}),
+            interval: settings.assistantStreamingCoalesceInterval,
           });
         }
       }

@@ -38,6 +38,23 @@ export const ListProjectionThreadActivitiesInput = Schema.Struct({
 });
 export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadActivitiesInput.Type;
 
+export const ListUserInputProjectionThreadActivitiesInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ListUserInputProjectionThreadActivitiesInput =
+  typeof ListUserInputProjectionThreadActivitiesInput.Type;
+
+/**
+ * Activity kinds that `derivePendingUserInputCountFromActivities` inspects.
+ * Every other activity kind is a no-op for that derivation, so narrowing a
+ * thread's activity read to just these kinds is behavior-preserving.
+ */
+export const USER_INPUT_PROJECTION_ACTIVITY_KINDS = [
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+] as const;
+
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -65,6 +82,17 @@ export interface ProjectionThreadActivityRepositoryShape {
    */
   readonly listByThreadId: (
     input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * List projected thread activity rows relevant to pending user-input
+   * tracking (see `USER_INPUT_PROJECTION_ACTIVITY_KINDS`), without loading
+   * the thread's full activity history.
+   *
+   * Same ordering as `listByThreadId`.
+   */
+  readonly listUserInputActivitiesByThreadId: (
+    input: ListUserInputProjectionThreadActivitiesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**

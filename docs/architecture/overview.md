@@ -42,6 +42,7 @@ T3 Code runs as a **Node.js WebSocket server** that wraps `codex app-server` (JS
 Related design:
 
 - [Resource telemetry architecture](./resource-telemetry.md)
+- [Event log compaction](./event-log-compaction.md)
 
 ## Event Lifecycle
 

@@ -1,10 +1,13 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import { NonNegativeInt } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  CountPendingProjectionPendingApprovalsInput,
   GetProjectionPendingApprovalInput,
   DeleteProjectionPendingApprovalInput,
   ListProjectionPendingApprovalsInput,
@@ -12,6 +15,10 @@ import {
   ProjectionPendingApprovalRepository,
   type ProjectionPendingApprovalRepositoryShape,
 } from "../Services/ProjectionPendingApprovals.ts";
+
+const PendingApprovalCountRowSchema = Schema.Struct({
+  pendingApprovalCount: NonNegativeInt,
+});
 
 const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -95,6 +102,21 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
       `,
   });
 
+  // COUNT(*) always returns exactly one row (0 when nothing matches), so
+  // `findOne` — not `findOneOption` — is the right shape here.
+  const countPendingProjectionPendingApprovalRows = SqlSchema.findOne({
+    Request: CountPendingProjectionPendingApprovalsInput,
+    Result: PendingApprovalCountRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          COUNT(*) AS "pendingApprovalCount"
+        FROM projection_pending_approvals
+        WHERE thread_id = ${threadId}
+          AND status = 'pending'
+      `,
+  });
+
   const upsert: ProjectionPendingApprovalRepositoryShape["upsert"] = (row) =>
     upsertProjectionPendingApprovalRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionPendingApprovalRepository.upsert:query")),
@@ -123,11 +145,21 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
       ),
     );
 
+  const countPendingByThreadId: ProjectionPendingApprovalRepositoryShape["countPendingByThreadId"] =
+    (input) =>
+      countPendingProjectionPendingApprovalRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionPendingApprovalRepository.countPendingByThreadId:query"),
+        ),
+        Effect.map((row) => row.pendingApprovalCount),
+      );
+
   return {
     upsert,
     listByThreadId,
     getByRequestId,
     deleteByRequestId,
+    countPendingByThreadId,
   } satisfies ProjectionPendingApprovalRepositoryShape;
 });
 

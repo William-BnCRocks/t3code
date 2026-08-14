@@ -24,6 +24,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -31,6 +32,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
@@ -260,6 +262,11 @@ describe("ProviderRuntimeIngestion", () => {
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
     baseDir?: string;
+    // Opt-in only: merging TestClock into every test's layer would also
+    // freeze Cache TTL expiry and other ambient-Clock behavior for suites
+    // that never call `advanceClock`, so only tests that need deterministic
+    // control over `Effect.sleep` (the coalesce timer) ask for it.
+    testClock?: boolean;
   }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
@@ -277,7 +284,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
-    const layer = ProviderRuntimeIngestionLive.pipe(
+    let layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
@@ -287,7 +294,14 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), options?.baseDir ?? process.cwd())),
       Layer.provideMerge(NodeServices.layer),
     );
+    if (options?.testClock) {
+      layer = layer.pipe(Layer.provideMerge(TestClock.layer()));
+    }
     runtime = ManagedRuntime.make(layer);
+    // Stable, non-null alias: `runtime` itself is reset to `null` in
+    // `afterEach`, so closures returned below (e.g. `advanceClock`) capture
+    // this local instead of re-reading the outer mutable binding.
+    const currentRuntime = runtime;
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
@@ -363,6 +377,14 @@ describe("ProviderRuntimeIngestion", () => {
       registryCalls: providerRegistry.calls,
       drain,
       stateDir,
+      // Routed through this harness's own runtime (not a bare
+      // `Effect.runPromise`) so it advances the same TestClock instance the
+      // harness's layer was built with — see `options.testClock`. Yields
+      // once after adjusting, same as `advanceTestClock` in
+      // ProviderService.test.ts, to give fibers woken by the adjustment a
+      // turn to run before the caller inspects state.
+      advanceClock: (duration: Duration.Input) =>
+        currentRuntime.runPromise(TestClock.adjust(duration).pipe(Effect.andThen(Effect.yieldNow))),
     };
   }
 
@@ -2436,6 +2458,347 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(finalMessage?.text).toBe("hello live");
     expect(finalMessage?.streaming).toBe(false);
+  });
+
+  it("coalesces streaming assistant deltas within the window into one event", async () => {
+    const harness = await createHarness({
+      testClock: true,
+      serverSettings: {
+        enableAssistantStreaming: true,
+        assistantStreamingCoalesceInterval: Duration.millis(200),
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-coalesce-two-deltas"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-two-deltas"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-coalesce-two-deltas",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-delta-coalesce-two-deltas-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-two-deltas"),
+      itemId: asItemId("item-coalesce-two-deltas"),
+      payload: { streamKind: "assistant_text", delta: "Hello " },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-delta-coalesce-two-deltas-2"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-two-deltas"),
+      itemId: asItemId("item-coalesce-two-deltas"),
+      payload: { streamKind: "assistant_text", delta: "world" },
+    });
+    await harness.drain();
+
+    // Zero dispatches until the coalesce window elapses.
+    const midThread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      midThread?.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-coalesce-two-deltas",
+      ),
+    ).toBe(false);
+    const eventsBeforeAdvance = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    expect(
+      eventsBeforeAdvance.filter(
+        (event) =>
+          event.type === "thread.message-sent" &&
+          event.payload.messageId.startsWith("assistant:item-coalesce-two-deltas"),
+      ),
+    ).toHaveLength(0);
+
+    await harness.advanceClock(Duration.millis(200));
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-coalesce-two-deltas" && message.text === "Hello world",
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-coalesce-two-deltas",
+      )?.streaming,
+    ).toBe(true);
+
+    // Exactly one command carried the concatenated, in-order text.
+    const eventsAfterAdvance = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEvents = eventsAfterAdvance.filter(
+      (
+        event,
+      ): event is Extract<(typeof eventsAfterAdvance)[number], { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId.startsWith("assistant:item-coalesce-two-deltas"),
+    );
+    expect(assistantEvents).toHaveLength(1);
+    expect(assistantEvents[0]?.payload.text).toBe("Hello world");
+    expect(assistantEvents[0]?.payload.streaming).toBe(true);
+  });
+
+  it("finalizes coalesced assistant text on turn completion before the window elapses, with no duplicate afterward", async () => {
+    const harness = await createHarness({
+      testClock: true,
+      serverSettings: {
+        enableAssistantStreaming: true,
+        assistantStreamingCoalesceInterval: Duration.millis(200),
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-coalesce-finalize"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-finalize"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-coalesce-finalize",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-delta-coalesce-finalize"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-finalize"),
+      itemId: asItemId("item-coalesce-finalize"),
+      payload: { streamKind: "assistant_text", delta: "partial thought" },
+    });
+    await harness.drain();
+
+    // The turn finalizes well inside the 200ms window: the clock never
+    // advances before this, so the coalesce timer cannot have fired yet.
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-coalesce-finalize"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-finalize"),
+      payload: { state: "completed" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-coalesce-finalize" &&
+          !message.streaming &&
+          message.text === "partial thought",
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-coalesce-finalize",
+      )?.text,
+    ).toBe("partial thought");
+
+    const eventsAfterFinalize = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEventsAfterFinalize = eventsAfterFinalize.filter(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId.startsWith("assistant:item-coalesce-finalize"),
+    );
+    expect(assistantEventsAfterFinalize).toHaveLength(2);
+
+    // The timer scheduled by the earlier delta is still pending. Advancing
+    // past its window must be a no-op: it finds an already-drained buffer.
+    await harness.advanceClock(Duration.millis(500));
+    await harness.drain();
+
+    const eventsAfterAdvance = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEventsAfterAdvance = eventsAfterAdvance.filter(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId.startsWith("assistant:item-coalesce-finalize"),
+    );
+    expect(assistantEventsAfterAdvance).toHaveLength(2);
+  });
+
+  it("spill-dispatches an oversized coalesced delta immediately, mid-window", async () => {
+    const harness = await createHarness({
+      testClock: true,
+      serverSettings: {
+        enableAssistantStreaming: true,
+        assistantStreamingCoalesceInterval: Duration.millis(200),
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const oversizedText = "x".repeat(40_000);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-coalesce-spill"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-spill"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-coalesce-spill",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-delta-coalesce-spill"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesce-spill"),
+      itemId: asItemId("item-coalesce-spill"),
+      payload: { streamKind: "assistant_text", delta: oversizedText },
+    });
+    await harness.drain();
+
+    // Visible immediately: no clock advance, still mid-window.
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-coalesce-spill" &&
+          message.text.length === oversizedText.length,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-coalesce-spill",
+    );
+    expect(message?.text).toBe(oversizedText);
+    expect(message?.streaming).toBe(true);
+
+    // The spill drained the buffer, but a timer is still scheduled; letting
+    // it fire must not duplicate the already-spilled text.
+    await harness.advanceClock(Duration.millis(200));
+    await harness.drain();
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEvents = events.filter(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId.startsWith("assistant:item-coalesce-spill"),
+    );
+    expect(assistantEvents).toHaveLength(1);
+  });
+
+  it("dispatches one command per delta when the coalesce interval is zero", async () => {
+    const harness = await createHarness({
+      serverSettings: {
+        enableAssistantStreaming: true,
+        assistantStreamingCoalesceInterval: Duration.millis(0),
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-interval-zero"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-interval-zero"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-interval-zero",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-delta-interval-zero-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-interval-zero"),
+      itemId: asItemId("item-interval-zero"),
+      payload: { streamKind: "assistant_text", delta: "Hello " },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-delta-interval-zero-2"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-interval-zero"),
+      itemId: asItemId("item-interval-zero"),
+      payload: { streamKind: "assistant_text", delta: "world" },
+    });
+    await harness.drain();
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-interval-zero" && message.text === "Hello world",
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-interval-zero",
+      )?.streaming,
+    ).toBe(true);
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEvents = events.filter(
+      (event): event is Extract<(typeof events)[number], { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId.startsWith("assistant:item-interval-zero"),
+    );
+    expect(assistantEvents).toHaveLength(2);
+    expect(assistantEvents[0]?.payload.text).toBe("Hello ");
+    expect(assistantEvents[0]?.payload.streaming).toBe(true);
+    expect(assistantEvents[1]?.payload.text).toBe("world");
+    expect(assistantEvents[1]?.payload.streaming).toBe(true);
   });
 
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {

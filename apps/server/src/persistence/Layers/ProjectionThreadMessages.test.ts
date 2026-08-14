@@ -111,4 +111,76 @@ layer("ProjectionThreadMessageRepository", (it) => {
       assert.deepEqual(rows[0]?.attachments, []);
     }),
   );
+
+  it.effect(
+    "getLatestUserMessageCreatedAtByThreadId returns null for a thread with no messages",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ProjectionThreadMessageRepository;
+        const threadId = ThreadId.make("thread-latest-user-message-empty");
+
+        const latestUserMessageCreatedAt =
+          yield* repository.getLatestUserMessageCreatedAtByThreadId({ threadId });
+        assert.equal(latestUserMessageCreatedAt, null);
+      }),
+  );
+
+  it.effect(
+    "getLatestUserMessageCreatedAtByThreadId ignores assistant messages and later-thread messages",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ProjectionThreadMessageRepository;
+        const threadId = ThreadId.make("thread-latest-user-message-mixed");
+        const otherThreadId = ThreadId.make("thread-latest-user-message-other");
+
+        // Earliest: user message.
+        yield* repository.upsert({
+          messageId: MessageId.make("message-latest-user-1"),
+          threadId,
+          turnId: null,
+          role: "user",
+          text: "first user message",
+          isStreaming: false,
+          createdAt: "2026-03-01T00:00:00.000Z",
+          updatedAt: "2026-03-01T00:00:00.000Z",
+        });
+        // Latest overall, but assistant-authored — must not count.
+        yield* repository.upsert({
+          messageId: MessageId.make("message-latest-assistant"),
+          threadId,
+          turnId: null,
+          role: "assistant",
+          text: "assistant reply",
+          isStreaming: false,
+          createdAt: "2026-03-01T00:00:02.000Z",
+          updatedAt: "2026-03-01T00:00:02.000Z",
+        });
+        // Latest user message for this thread.
+        yield* repository.upsert({
+          messageId: MessageId.make("message-latest-user-2"),
+          threadId,
+          turnId: null,
+          role: "user",
+          text: "second user message",
+          isStreaming: false,
+          createdAt: "2026-03-01T00:00:01.000Z",
+          updatedAt: "2026-03-01T00:00:01.000Z",
+        });
+        // A later user message, but on a different thread — must not count.
+        yield* repository.upsert({
+          messageId: MessageId.make("message-latest-user-other-thread"),
+          threadId: otherThreadId,
+          turnId: null,
+          role: "user",
+          text: "other thread user message",
+          isStreaming: false,
+          createdAt: "2026-03-01T00:00:03.000Z",
+          updatedAt: "2026-03-01T00:00:03.000Z",
+        });
+
+        const latestUserMessageCreatedAt =
+          yield* repository.getLatestUserMessageCreatedAtByThreadId({ threadId });
+        assert.equal(latestUserMessageCreatedAt, "2026-03-01T00:00:01.000Z");
+      }),
+  );
 });

@@ -42,6 +42,12 @@ export const GetProjectionPendingApprovalInput = Schema.Struct({
 });
 export type GetProjectionPendingApprovalInput = typeof GetProjectionPendingApprovalInput.Type;
 
+export const CountPendingProjectionPendingApprovalsInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type CountPendingProjectionPendingApprovalsInput =
+  typeof CountPendingProjectionPendingApprovalsInput.Type;
+
 export const DeleteProjectionPendingApprovalInput = Schema.Struct({
   requestId: ApprovalRequestId,
 });
@@ -75,6 +81,14 @@ export interface ProjectionPendingApprovalRepositoryShape {
   readonly getByRequestId: (
     input: GetProjectionPendingApprovalInput,
   ) => Effect.Effect<Option.Option<ProjectionPendingApproval>, ProjectionRepositoryError>;
+
+  /**
+   * Count approval requests still `pending` for a thread, without loading
+   * every approval row.
+   */
+  readonly countPendingByThreadId: (
+    input: CountPendingProjectionPendingApprovalsInput,
+  ) => Effect.Effect<number, ProjectionRepositoryError>;
 
   /**
    * Delete a pending approval row by request id.

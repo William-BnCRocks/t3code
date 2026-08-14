@@ -554,27 +554,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [messages, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
-        projectionThreadMessageRepository.listByThreadId({ threadId }),
-        projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
-        projectionThreadActivityRepository.listByThreadId({ threadId }),
-        projectionPendingApprovalRepository.listByThreadId({ threadId }),
-      ]);
+      // Narrow reads instead of loading full tables: a thread's entire
+      // message/activity history can be large, and this runs on every event
+      // that can move the summary, inside the commit transaction.
+      const [latestUserMessageAt, pendingApprovalCount, userInputActivities, proposedPlans] =
+        yield* Effect.all([
+          projectionThreadMessageRepository.getLatestUserMessageCreatedAtByThreadId({ threadId }),
+          projectionPendingApprovalRepository.countPendingByThreadId({ threadId }),
+          projectionThreadActivityRepository.listUserInputActivitiesByThreadId({ threadId }),
+          projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
+        ]);
 
-      let latestUserMessageAt: string | null = null;
-      for (const message of messages) {
-        if (
-          message.role === "user" &&
-          (latestUserMessageAt === null || message.createdAt > latestUserMessageAt)
-        ) {
-          latestUserMessageAt = message.createdAt;
-        }
-      }
-
-      const pendingApprovalCount = pendingApprovals.filter(
-        (approval) => approval.status === "pending",
-      ).length;
-      const pendingUserInputCount = derivePendingUserInputCountFromActivities(activities);
+      const pendingUserInputCount = derivePendingUserInputCountFromActivities(userInputActivities);
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
         latestTurnId: existingRow.value.latestTurnId,
         proposedPlans,

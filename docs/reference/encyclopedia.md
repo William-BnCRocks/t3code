@@ -74,6 +74,10 @@ The logic that applies domain events to the read model or projection tables. See
 
 The current materialized view of orchestration state. In [the contracts][1], it holds projects, threads, messages, activities, checkpoints, and session state. See [ProjectionSnapshotQuery.ts][10] and [OrchestrationEngine.ts][7].
 
+#### Compaction
+
+Deletion of old, fully-projected domain events from `orchestration_events` once every projector has applied them and they are past the retention window. Projections are the durable snapshot; compaction never removes anything the engine still needs to rebuild its read model. See [event-log-compaction.md][25].
+
 #### Reactor
 
 A side-effecting service that handles follow-up work after events or runtime signals. Examples include [CheckpointReactor.ts][6], [ProviderCommandReactor.ts][12], and [ProviderRuntimeIngestion.ts][5].
@@ -178,3 +182,4 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../apps/server/src/checkpointing/Utils.ts
 [23]: ../apps/server/src/checkpointing/Diffs.ts
 [24]: ./architecture.md
+[25]: ../architecture/event-log-compaction.md

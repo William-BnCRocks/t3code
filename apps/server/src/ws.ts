@@ -68,6 +68,7 @@ import {
   projectThreadDetailSnapshot,
 } from "./orchestration/ActivityPayloadProjection.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import * as EventLogCompaction from "./orchestration/Services/EventLogCompaction.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -295,6 +296,33 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
 const SHELL_RESUME_MAX_GAP = 1_000;
 
+// Pure so the boundary conditions (negative gap, oversized gap, cursor below
+// the compaction floor) can be unit tested without an Effect/DB harness.
+// A cursor at or below the compaction floor is invalid for replay: events at
+// or below the floor may have been deleted by EventLogCompaction, even
+// though each stream keeps its newest event regardless of the floor. See
+// docs/architecture/event-log-compaction.md.
+export function shouldFallBackToShellSnapshot(
+  replayGap: number,
+  afterSequence: number,
+  compactionFloor: number,
+): boolean {
+  return replayGap < 0 || replayGap > SHELL_RESUME_MAX_GAP || afterSequence < compactionFloor;
+}
+
+// Type guard (not just a boolean) so `input.afterSequence` narrows to
+// `number` at call sites — mirrors the pre-existing `!== undefined` check it
+// replaces. Events at or below the compaction floor may have been deleted,
+// so a replay from below it would be silently incomplete; callers should
+// fall through to a full snapshot instead. See
+// docs/architecture/event-log-compaction.md.
+export function canReplayThreadFromCursor(
+  afterSequence: number | undefined,
+  compactionFloor: number,
+): afterSequence is number {
+  return afterSequence !== undefined && afterSequence >= compactionFloor;
+}
+
 function toAuthAccessStreamEvent(
   change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,
   revision: number,
@@ -345,6 +373,7 @@ const makeWsRpcLayer = (
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const eventLogCompaction = yield* EventLogCompaction.EventLogCompaction;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1169,13 +1198,15 @@ const makeWsRpcLayer = (
                 const afterSequence = input.afterSequence;
                 const headSequence = yield* orchestrationEngine.latestSequence;
                 const replayGap = headSequence - afterSequence;
+                const compactionFloor = yield* eventLogCompaction.compactionFloor;
                 // Gap too large: replaying every intervening event (each a shell
                 // refetch) is far more expensive than a single O(active-threads)
                 // snapshot. A cursor ahead of this engine's authoritative state
-                // is also invalid, so reset it with a snapshot. Send the snapshot
-                // followed by the buffered live tail, exactly as the
-                // no-afterSequence path does.
-                if (replayGap < 0 || replayGap > SHELL_RESUME_MAX_GAP) {
+                // is also invalid, so reset it with a snapshot. A cursor at or
+                // below the compaction floor is invalid too, since events down
+                // there may have been deleted. Send the snapshot followed by the
+                // buffered live tail, exactly as the no-afterSequence path does.
+                if (shouldFallBackToShellSnapshot(replayGap, afterSequence, compactionFloor)) {
                   const snapshot = yield* loadSnapshot;
                   return Stream.concat(
                     Stream.make({ kind: "snapshot" as const, snapshot }),
@@ -1270,7 +1301,14 @@ const makeWsRpcLayer = (
               // page-bounded limit): the range is normally tiny (a fresh HTTP
               // snapshot sequence) and the per-thread filter runs after reading,
               // so a global cap could otherwise omit this thread's events.
-              if (input.afterSequence !== undefined) {
+              //
+              // Also require the cursor to be at or above the compaction floor.
+              // Events at or below the floor may have been deleted by
+              // EventLogCompaction, so a replay from below it would be silently
+              // incomplete — fall through to the full snapshot branch below
+              // instead, the same as an absent cursor.
+              const compactionFloor = yield* eventLogCompaction.compactionFloor;
+              if (canReplayThreadFromCursor(input.afterSequence, compactionFloor)) {
                 const afterSequence = input.afterSequence;
                 const catchUpStream = orchestrationEngine
                   .readEvents(afterSequence, Number.MAX_SAFE_INTEGER)
